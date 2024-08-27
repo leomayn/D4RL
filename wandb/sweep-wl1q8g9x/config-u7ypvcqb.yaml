@@ -1,0 +1,8 @@
+wandb_version: 1
+
+BATCH_SIZE:
+  value: 50
+LR:
+  value: 1.0e-05
+NUM_ENVS:
+  value: 32

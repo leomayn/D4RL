@@ -1,0 +1,7 @@
+#!/homes/gws/leomayn/leo/D4RL/test-env/bin/python3.10
+
+from absl import app
+from brax.training import learner
+
+if __name__ == '__main__':
+  app.run(learner.main)

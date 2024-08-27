@@ -1,0 +1,40 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    python_version: 3.10.0
+    cli_version: 0.17.4
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1724300753
+    t:
+      1:
+      - 12
+      - 45
+      - 50
+      - 55
+      2:
+      - 12
+      - 45
+      - 50
+      - 55
+      3:
+      - 2
+      - 23
+      - 37
+      - 61
+      4: 3.10.0
+      5: 0.17.4
+      8:
+      - 5
+      13: linux-x86_64
+BATCH_SIZE:
+  desc: null
+  value: 100
+LR:
+  desc: null
+  value: 0.0001
+NUM_ENVS:
+  desc: null
+  value: 128
