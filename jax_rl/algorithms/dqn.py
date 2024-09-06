@@ -10,66 +10,90 @@ from jax_rl.algorithms import BaseAgent
 from jax_rl.buffer import ExperienceReplay
 from jax_rl.utils import Transition
 
+from utils.networks import AgentRNN, ActorRNN, ScannedRNN
+
 import jax
 from jax import random
 
-def policy_extractor(rng, q_values, exploration=True, epsilon=0.1):
-    """Sample an action based on Q-values, with optional epsilon-greedy exploration."""
-    if exploration:
-        # Epsilon-greedy exploration
-        rng, key = random.split(rng)
-        explore = random.uniform(key) < epsilon
-        if explore:
-            # Random action
-            rng, key = random.split(rng)
-            action = random.randint(key, (1,), 0, q_values.shape[-1])
-        else:
-            # Greedy action
-            action = jnp.argmax(q_values, axis=-1)
-    else:
-        # Greedy action only
-        action = jnp.argmax(q_values, axis=-1)
+def policy_extractor(key, q_values, exploration=True, epsilon=0.1):
+    """
+    Extract continuous actions based on the Q-values with exploration noise.
     
-    return action.item()
+    q_values: Q-values predicted by the network, should correspond to continuous action parameters.
+    key: JAX random key for any stochastic operation (like sampling).
+    exploration: Whether to apply exploration noise.
+    epsilon: The scale of exploration noise (how much noise to add).
+    
+    Returns:
+    Continuous actions of shape (batch_size, action_dim).
+    """
+    if exploration:
+        # Apply Gaussian noise for exploration, scaled by epsilon
+        action_noise = jax.random.normal(key, q_values.shape) * epsilon
+        actions = q_values + action_noise
+    else:
+        # Simply use the q_values as the deterministic action output
+        actions = q_values
+
+    # Remove the time-step dimension to get the shape (batch_size, action_dim)
+    actions = jnp.squeeze(actions, axis=0)
+    
+    return actions
+
+
+
 
 
 class DQN(BaseAgent):
 	''' Deep Q-network'''
 
-	def __init__(self, key, n_states, n_actions, gamma, buffer_size, model, lr):
-		'''
-		model must take sequential inputs and a hidden state.
-		init_state must provide the initial state for a given batch_size.
-		'''
+	def __init__(self, key, n_states, n_actions, gamma, buffer_size, model, lr, num_envs):
 		super(DQN, self).__init__(key, n_states, n_actions, gamma)
 
 		self.buffer = ExperienceReplay(buffer_size)
-		# self.policy = policy
+		self.q_network = model  # Use the custom AgentRNN model
 
-		# Q-network and parameters
-		self.params = model.init(next(self.prng), jnp.ones((1, n_states)))
+		# Initialize the model parameters
+		init_x = (
+			jnp.zeros((1, num_envs, n_states)),  # (time_step, batch_size, obs_size)
+			jnp.zeros((1, num_envs))  # (time_step, batch size)
+		)
+  
+		init_hidden_state = ScannedRNN.initialize_carry(num_envs, model.hidden_dim)
+		self.params = self.q_network.init(key, init_hidden_state, init_x)
 		self.update_target()
-		self.q_network = model.apply
 
-		# optimiser
+		# Optimizer
 		self.opt_update, self.opt_state = self.init_optimiser(lr, self.params)
+		self.num_envs = num_envs
 
-	def act(self, s, exploration=True):
-		''' Get an action from the q-network given the state.
-		s - shape (1, n_states) current state
+	def act(self, key, s, dones, hidden_state, exploration=True, epsilon=0.1):
+		""" Get an action from the q-network given the state and done flags.
+		s - shape (batch_size, n_states) current state
+		dones - shape (batch_size, 1) done flags
 		exploration - bool - whether to choose greedy action or use epsilon greedy.
-		Returns: action - int
-		'''
-		assert s.shape == (1, self.n_states)
-		q_values = self.q_network(self.params, s)
+		Returns: hidden_state - updated hidden state after RNN pass
+				actions - array of ints (one per environment)
+		"""
 
-		# Use the policy extractor to get an action
-		action = policy_extractor(next(self.prng), q_values, exploration)
-		return action
+		# Prepare the inputs for the network: add a time_step dimension
+		obs_ = s[np.newaxis, :]  # Add time_step dimension
+		dones_ = dones[np.newaxis, :]  # Add time_step dimension
+
+		# Pass the inputs through the network to get q-values
+		hidden_state, q_values = self.q_network.apply(self.params, hidden_state, (obs_, dones_))
+
+		# Select actions using epsilon-greedy policy
+		actions = policy_extractor(key, q_values, exploration=exploration, epsilon=epsilon)
+
+		print("Actions shape before squeeze:", actions.shape)
+
+		return key, hidden_state, actions
+
 
 	def train(self, batch_size):
-		''' Train the agent on a single episode. Uses the double q-learning target.
-		Returns: td loss - float.'''
+		"""Train the agent on a single episode. Uses the double q-learning target.
+		Returns: td loss - float."""
 		if len(self.buffer.buffer) > batch_size:
 			s, a, r, d, s_next = self.buffer.sample(batch_size)
 

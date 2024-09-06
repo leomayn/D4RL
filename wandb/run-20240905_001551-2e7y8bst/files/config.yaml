@@ -1,0 +1,127 @@
+wandb_version: 1
+
+DEBUG:
+  desc: null
+  value: false
+DISABLE_JIT:
+  desc: null
+  value: false
+SEED:
+  desc: null
+  value: 3
+ENV_NAME:
+  desc: null
+  value: halfcheetah
+TEST_ENV_NAME:
+  desc: null
+  value: halfcheetah
+ENV_KWARGS:
+  desc: null
+  value: {}
+LR_LINEAR_DECAY:
+  desc: null
+  value: false
+MAX_GRAD_NORM:
+  desc: null
+  value: 25
+TOTAL_TIMESTEPS:
+  desc: null
+  value: 10000000.0
+NUM_STEPS:
+  desc: null
+  value: 128
+NUM_ENVS:
+  desc: null
+  value: 16
+NUM_TEST_ENVS:
+  desc: null
+  value: 128
+NUM_TEST_STEPS:
+  desc: null
+  value: 130
+TEST_INTERVAL:
+  desc: null
+  value: 1
+SHUFFLE_SEED:
+  desc: null
+  value: 5
+AGENT_HIDDEN_DIM:
+  desc: null
+  value: 64
+AGENT_INIT_SCALE:
+  desc: null
+  value: 2.0
+BUFFER_SIZE:
+  desc: null
+  value: 5000
+BUFFER_BATCH_SIZE:
+  desc: null
+  value: 32
+TARGET_UPDATE_INTERVAL:
+  desc: null
+  value: 200
+LR:
+  desc: null
+  value: 0.005
+EPS_ADAM:
+  desc: null
+  value: 0.001
+GAMMA:
+  desc: null
+  value: 0.9
+VERBOSE:
+  desc: null
+  value: false
+LOG_FREQ:
+  desc: null
+  value: 1
+WANDB_MODE:
+  desc: null
+  value: online
+ENTITY:
+  desc: null
+  value: marlhf
+PROJECT:
+  desc: null
+  value: DQN
+PROJECT_PREFIX:
+  desc: null
+  value: ''
+IL_NETWORK_HIDDEN:
+  desc: null
+  value: 128
+IL_NETWORK_SAVE_PATH:
+  desc: null
+  value: results/IL_configs/student_network
+MODEL_SAVE_PATH:
+  desc: null
+  value: results/DQN/dqn_network
+_wandb:
+  desc: null
+  value:
+    python_version: 3.10.0
+    cli_version: 0.17.4
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1725520551
+    t:
+      1:
+      - 12
+      - 45
+      - 50
+      - 55
+      2:
+      - 12
+      - 45
+      - 50
+      - 55
+      3:
+      - 13
+      - 15
+      - 16
+      - 23
+      4: 3.10.0
+      5: 0.17.4
+      8:
+      - 5
+      13: linux-x86_64

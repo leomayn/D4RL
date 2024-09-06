@@ -1,63 +1,150 @@
-import os 
+import os
+import jax
+import jax.numpy as jnp
+import numpy as np
+from functools import partial
+from typing import NamedTuple, Union
+import time
+
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ['PYOPENGL_PLATFORM'] = 'egl'
 os.environ['MUJOCO_GL'] = 'egl'
 os.environ['D4RL_SUPPRESS_IMPORT_ERROR'] = '1'
 
-import hydra
-import time
-import jax
-import jax.numpy as jnp
-import numpy as np
-from flax import serialization
-from flax.training.train_state import TrainState
+import chex
 import optax
-from omegaconf import OmegaConf
-from typing import NamedTuple
-from functools import partial
+import flax.linen as nn
+from flax.linen.initializers import constant, orthogonal
+from flax.training.train_state import TrainState
+import flashbax as fbx
 import wandb
+import hydra
+from omegaconf import OmegaConf
+from safetensors.flax import save_file
+from flax.traverse_util import flatten_dict
+import matplotlib.pyplot as plt
 
-from utils.networks import AgentRNN, ActorRNN, ScannedRNN
-from jax_rl.algorithms import DQN
-
-import gym
-import d4rl
+from flax import serialization
 
 from brax import envs
 
-from jax_rl.utils import Transition
+from utils.networks import ActorRNN
 
-def generate_reward(il_model, il_params, obs, action, done):
+class ScannedRNN(nn.Module):
+    @partial(
+        nn.scan,
+        variable_broadcast="params",
+        in_axes=0,
+        out_axes=0,
+        split_rngs={"params": False},
+    )
+    @nn.compact
+    def __call__(self, carry, x):
+        rnn_state = carry
+        ins, resets = x
+        hidden_size = ins.shape[-1]
+        rnn_state = jnp.where(
+            resets[:, np.newaxis],
+            self.initialize_carry(hidden_size, *ins.shape[:-1]),
+            rnn_state,
+        )
+        new_rnn_state, y = nn.GRUCell(hidden_size)(rnn_state, ins)
+        return new_rnn_state, y
+
+    @staticmethod
+    def initialize_carry(hidden_size, *batch_size):
+        return nn.GRUCell(hidden_size).initialize_carry(jax.random.PRNGKey(0), (*batch_size, hidden_size))
+
+
+class AgentRNN(nn.Module):
+    action_dim: int
+    hidden_dim: int
+    init_scale: float
+
+    @nn.compact
+    def __call__(self, hidden, x):
+        obs, dones = x
+        embedding = nn.Dense(self.hidden_dim, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(obs)
+        embedding = nn.relu(embedding)
+
+        rnn_in = (embedding, dones)
+        hidden, embedding = ScannedRNN()(hidden, rnn_in)
+
+        mean = nn.Dense(self.action_dim, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(embedding)
+        log_std = nn.Dense(self.action_dim, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(embedding)
+        std = jnp.exp(log_std)  # Exponentiate to get the standard deviation
+
+        return hidden, mean, std
+
+def policy_extractor(key, mean, exploration=True, epsilon=0.1):
+    """
+    Extract continuous actions based on the mean action with exploration noise.
+
+    mean: Mean action predicted by the network.
+    key: JAX random key for any stochastic operation (like sampling).
+    exploration: Whether to apply exploration noise.
+    epsilon: The scale of exploration noise (how much noise to add).
+
+    Returns:
+    Continuous actions of shape (batch_size, action_dim).
+    """
+    if exploration:
+        # Apply Gaussian noise for exploration, scaled by epsilon
+        action_noise = jax.random.normal(key, mean.shape) * epsilon
+        actions = mean + action_noise
+    else:
+        # Simply use the mean as the deterministic action output
+        actions = mean
+
+    return actions
+
+class Transition(NamedTuple):
+    obs: jnp.ndarray
+    actions: jnp.ndarray
+    rewards: jnp.ndarray
+    dones: jnp.ndarray
+    infos: dict
+
+def generate_reward(il_model, il_params, obs, action, done, il_h_state):
     in_data = (obs, done)
-    s_h_state, pi = il_model.apply(il_params, s_h_state, in_data)
-    return pi.log_prob(action)
+    il_h_state, pi = il_model.apply(il_params, il_h_state, in_data)
+    reward = pi.log_prob(action)
+    reward = jnp.squeeze(reward, axis=0)
+    return (reward, il_h_state)
+
+def plot_rewards(metrics, filename, num_seeds):
+    test_metrics = metrics["test_metrics"]
+    test_returns = test_metrics["test_returns"].mean(-1).reshape((num_seeds, -1))
+
+    reward_mean = test_returns.mean(0)
+    reward_std = test_returns.std(0) / np.sqrt(num_seeds)
+    
+    plt.plot(reward_mean)
+    plt.fill_between(range(len(reward_mean)), reward_mean - reward_std, reward_mean + reward_std, alpha=0.2)
+    plt.xlabel("Update Step")
+    plt.ylabel("Return")
+    plt.savefig(f'{filename}.png')
 
 def make_train(config):
-    env = envs.get_environment(config["ENV_NAME"])
-    reset_fn = jax.jit(jax.vmap(env.reset))
-    step_fn = jax.jit(jax.vmap(env.step))
+    config["NUM_UPDATES"] = (
+        config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
+    )
     
-    # Initialize DQN agent
-    dqn_agent = DQN(key=jax.random.PRNGKey(0),
-                    n_states=env.observation_space.shape[0],
-                    n_actions=env.action_space.n,
-                    gamma=config['GAMMA'],
-                    buffer_size=config['BUFFER_SIZE'],
-                    model=AgentRNN(action_dim=env.action_space.n, hidden_dim=config["HIDDEN_DIM"]),
-                    lr=config['LR'])
+    env = envs.create(config["ENV_NAME"])
+    test_env = envs.create(config["TEST_ENV_NAME"])
     
-    # Load IL model parameters
-    il_model = ActorRNN(action_dim=gym.make(config["ENV_NAME"]).action_space.shape[0], config=config)
+    # Beginning of IL
+    il_model = ActorRNN(action_dim=env.action_size, config=config)
     rng = jax.random.PRNGKey(0)
     _s_init_x = (
-        jnp.zeros((1, 1, gym.make(config["ENV_NAME"]).observation_space.shape[0])),
+        jnp.zeros((1, 1, env.observation_size)),
         jnp.zeros((1, 1))
     )
-    _s_init_h = ScannedRNN.initialize_carry(1, config["STUDENT_NETWORK_HIDDEN"])
+    _s_init_h = ScannedRNN.initialize_carry(config["NUM_ENVS"], config["IL_NETWORK_HIDDEN"])
 
     init_params = il_model.init(rng, _s_init_h, _s_init_x)
+    params_path = os.path.join(config["IL_NETWORK_SAVE_PATH"], 'final.msgpack')
 
-    params_path = os.path.join(config["STUDENT_NETWORK_SAVE_PATH"], 'final.msgpack')
     if os.path.exists(params_path):
         with open(params_path, "rb") as f:
             params_bytes = f.read()
@@ -67,139 +154,302 @@ def make_train(config):
         print(f"Parameters file not found at {params_path}. Please check the path and try again.")
         return
 
+    # End of IL
+
     def train(rng):
-        reset_rng, rng = jax.random.split(rng)
-        reset_rngs = jax.random.split(reset_rng, config["NUM_ENVS"])
-        env_state  = reset_fn(reset_rngs)
-        def episode_step(episode_state, episode_idx):
-            state, rng, episode_rewards, best_test_return = episode_state
-            total_reward = 0
-            rng, step_rng = jax.random.split(rng)
+        # INIT ENV
+        rng, _rng = jax.random.split(rng)
+        
+        reset_fn = jax.jit(jax.vmap(env.reset))
+        step_fn = jax.jit(jax.vmap(env.step))
+        
+        test_reset_fn = jax.jit(jax.vmap(test_env.reset))
+        test_step_fn = jax.jit(jax.vmap(test_env.step))
+        
+        reset_rngs = jax.random.split(_rng, config["NUM_ENVS"])
+        env_state = reset_fn(reset_rngs)
+        init_obs = env_state.obs
+        init_dones = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
 
-            def step(step_state, t):
-                state, rng, total_reward = step_state
-                prev_obs = state.obs
-                prev_done = state.done
-                action = dqn_agent.act(jnp.array(prev_obs)[jnp.newaxis, :], exploration=True)
-                next_state = step_fn(state, action)
-                done = next_state.done
-                obs = next_state.obs
-                reward = generate_reward(il_model, il_params, prev_obs, action, prev_done)
-                
-                dqn_agent.update_buffer(Transition(s=state, a=action, r=reward, d=done, s_next=obs))
-                loss = dqn_agent.train(batch_size=config['BATCH_SIZE'])
-                
-                total_reward += reward
-                new_state = next_state if not done else env.reset()
-
-                return (new_state, rng, total_reward), (state, reward, done, loss)
-
-            # Using jax.lax.scan to iterate over timesteps
-            (final_state, _, total_reward), _ = jax.lax.scan(step, (state, step_rng, 0), jnp.arange(config['MAX_TIMESTEPS']))
-
-            episode_rewards = episode_rewards.at[episode_idx].set(total_reward)
-
-            # Update target network periodically
-            def update_target_fn(val):
-                dqn_agent.update_target()
-                return val
-
-            update_condition = (episode_idx % config['TARGET_UPDATE_FREQ']) == 0
-            episode_rewards = jax.lax.cond(update_condition, update_target_fn, lambda x: x, episode_rewards)
-
-            # Log to wandb periodically
-            def log_wandb_fn(val):
-                print(f'Episode {episode_idx}: Total Reward = {total_reward}, Avg Reward = {jnp.mean(val[-100:])}')
-                wandb.log({"Total Reward": total_reward, "Avg Reward (last 100)": jnp.mean(val[-100:])})
-                return val
-
-            log_condition = (episode_idx % config['LOG_FREQ']) == 0
-            episode_rewards = jax.lax.cond(log_condition, log_wandb_fn, lambda x: x, episode_rewards)
-
-            # Test the model periodically
-            def test_and_save_model_fn(val):
-                test_return = test_model(dqn_agent, dqn_agent.params, config, rng)
-                new_best_test_return = jnp.maximum(best_test_return, test_return)
-                wandb.log({"Test Return": test_return}, step=episode_idx)
-                
-                def save_model_fn(val):
-                    save_model(dqn_agent.params, config["MODEL_SAVE_PATH"], 'best_model.msgpack')
-                    return val
-                
-                save_condition = test_return > best_test_return
-                jax.lax.cond(save_condition, save_model_fn, lambda x: x, val)
-                return new_best_test_return
-
-            test_condition = (episode_idx % config['TEST_INTERVAL']) == 0
-            best_test_return = jax.lax.cond(test_condition, test_and_save_model_fn, lambda x: x, best_test_return)
-
-            return (final_state, rng, episode_rewards, best_test_return), total_reward
-
-        episode_rewards = jnp.zeros(config['NUM_EPISODES'])
-        best_test_return = float('-inf')
-
-        (final_state, _, episode_rewards, best_test_return), _ = jax.lax.scan(
-            episode_step, 
-            (env_state, rng, episode_rewards, best_test_return), 
-            jnp.arange(config['NUM_EPISODES'])
+        # INIT BUFFER
+        def _env_sample_step(env_state, unused):
+            rng, key_a, key_s = jax.random.split(jax.random.PRNGKey(0), 3)
+            
+            # Sample a random action from the environment's action space
+            action = jax.random.uniform(key_a, shape=(config["NUM_ENVS"], env.action_size), minval=-1, maxval=1)
+            
+            # Step the environment with the sampled action
+            env_state = step_fn(env_state, action)
+            obs = env_state.obs
+            rewards = env_state.reward
+            dones = env_state.done
+            infos = env_state.info
+            
+            transition = Transition(obs, action, rewards, dones, infos)
+            return env_state, transition
+        
+        _, sample_traj = jax.lax.scan(_env_sample_step, env_state, None, config["NUM_STEPS"])
+        sample_traj_unbatched = jax.tree_util.tree_map(lambda x: x[:, 0], sample_traj)
+        buffer = fbx.make_trajectory_buffer(
+            max_length_time_axis=config['BUFFER_SIZE']//config['NUM_ENVS'],
+            min_length_time_axis=config['BUFFER_BATCH_SIZE'],
+            sample_batch_size=config['BUFFER_BATCH_SIZE'],
+            add_batch_size=config['NUM_ENVS'],
+            sample_sequence_length=1,
+            period=1,
         )
+        buffer_state = buffer.init(sample_traj_unbatched)
 
-        return episode_rewards
+        # INIT NETWORK
+        agent = AgentRNN(action_dim=env.action_size, hidden_dim=config["AGENT_HIDDEN_DIM"], init_scale=config['AGENT_INIT_SCALE'])
+        rng, _rng = jax.random.split(rng)
+        init_x = (jnp.zeros((1, 1, env.observation_size)), jnp.zeros((1, 1)))
+        init_hs = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], 1)
+        network_params = agent.init(_rng, init_hs, init_x)
 
-    def test_model(dqn_agent, params, config, rng):
-        test_env = envs.get_environment(config["TEST_ENV_NAME"])
-        reset_fn = jax.jit(jax.vmap(test_env.reset))
-        step_fn = jax.jit(jax.vmap(test_env.step))
-        reset_rng, rng = jax.random.split(rng)
-        reset_rngs = jax.random.split(reset_rng, config["NUM_TEST_ENVS"])
-        test_state  = reset_fn(reset_rngs)
-        total_test_reward = 0
+        # INIT TRAIN STATE AND OPTIMIZER
+        tx = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.adam(learning_rate=config['LR'], eps=config['EPS_ADAM']),
+        )
+        train_state = TrainState.create(
+            apply_fn=agent.apply,
+            params=network_params,
+            tx=tx,
+        )
+        target_agent_params = jax.tree_util.tree_map(lambda x: jnp.copy(x), train_state.params)
 
-        def _test_step(test_state, t):
-            state, rng, total_reward = test_state
-            prev_obs = state.obs
-            action = dqn_agent.act(jnp.array(prev_obs)[jnp.newaxis, :], exploration=False)
-            next_state = step_fn(state, action)
-            done = state.done
-            obs = state.obs
-            reward = state.reward
-            total_reward += reward
+        # HOMOGENEOUS PASS FUNCTION
+        def homogeneous_pass(params, hidden_state, obs, dones):
+            print("obs ", obs.shape)
+            print("dones ", dones.shape)
+            hidden_state, mean, std = agent.apply(params, hidden_state, (obs, dones))
+            return hidden_state, mean, std
 
-            return (next_state if not done else test_env.reset(), rng, total_reward), (next_state, reward, done)
+        # TRAINING LOOP
+        def _update_step(runner_state, unused):
+            train_state, target_agent_params, env_state, buffer_state, time_state, init_obs, init_dones, test_metrics, rng = runner_state
 
-        (final_state, _, total_test_reward), _ = jax.lax.scan(_test_step, (test_state, rng, 0), jnp.arange(config['MAX_TEST_STEPS']))
+            def _env_step(step_state, unused):
+                params, env_state, last_obs, last_dones, hstate, il_h_state, rng, t = step_state
+                rng, key_a, key_s = jax.random.split(rng, 3)
+                
+                obs_ = last_obs[np.newaxis, :]
+                dones_ = last_dones[np.newaxis, :]
 
-        return total_test_reward
+                # SELECT ACTION
+                hstate, mean, std = homogeneous_pass(params, hstate, obs_, dones_)
+                action = policy_extractor(key_a, mean, exploration=True, epsilon=config.get('EXPLORATION_NOISE', 0.1)).squeeze(0)
+                reward, il_h_state = generate_reward(il_model, il_params, obs_, action, dones_, il_h_state)
 
-    def save_model(params, save_path, filename):
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
-        file_path = os.path.join(save_path, filename)
-        with open(file_path, "wb") as f:
-            f.write(serialization.to_bytes(params))
-        print(f"Model saved to {file_path}")
+                # STEP ENV
+                env_state = step_fn(env_state, action)
+                obs = env_state.obs
+                done = env_state.done
+                info = env_state.info
+                transition = Transition(last_obs, action, reward, done, info)  # Empty info dict
 
+                step_state = (params, env_state, obs, done.astype(bool), hstate, il_h_state, rng, t+1)
+                return step_state, transition
+
+            rng, _rng = jax.random.split(rng)
+            hstate = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], config["NUM_ENVS"])
+            il_h_state = ScannedRNN.initialize_carry(config['IL_NETWORK_HIDDEN'], config["NUM_ENVS"])
+
+            step_state = (
+                train_state.params,
+                env_state,
+                init_obs,
+                init_dones,
+                hstate,
+                il_h_state, 
+                _rng,
+                time_state['timesteps']
+            )
+
+            step_state, traj_batch = jax.lax.scan(_env_step, step_state, None, config["NUM_STEPS"])
+
+            buffer_traj_batch = jax.tree_util.tree_map(
+                lambda x: jnp.swapaxes(x, 0, 1)[:, np.newaxis], 
+                traj_batch
+            )
+            buffer_state = buffer.add(buffer_state, buffer_traj_batch)
+
+            # LEARNING PHASE
+            def _loss_fn(params, target_agent_params, init_hs, learn_traj):
+                obs_ = learn_traj.obs
+                dones_ = learn_traj.dones
+                hstate, mean, std = homogeneous_pass(params, init_hs, obs_, dones_)
+                _, target_mean, target_std = homogeneous_pass(target_agent_params, init_hs, obs_, dones_)
+
+                # Compute value estimates (e.g., using critic network)
+                # Since DQN is not directly applicable to continuous actions,
+                # you may need to adjust this to use a suitable algorithm like DDPG, TD3, or SAC
+
+                # Placeholder loss (since DQN isn't suitable for continuous actions)
+                loss = jnp.array(0.0)
+
+                return loss
+
+            rng, _rng = jax.random.split(rng)
+            learn_traj = buffer.sample(buffer_state, _rng).experience
+            learn_traj = jax.tree_util.tree_map(
+                lambda x: jnp.swapaxes(x[:, 0], 0, 1), 
+                learn_traj
+            )
+            init_hs = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], config["BUFFER_BATCH_SIZE"])
+
+            grad_fn = jax.value_and_grad(_loss_fn, has_aux=False)
+            loss, grads = grad_fn(train_state.params, target_agent_params, init_hs, learn_traj)
+            train_state = train_state.apply_gradients(grads=grads)
+
+            rng, _rng = jax.random.split(rng)
+            reset_rngs = jax.random.split(_rng, config["NUM_ENVS"])
+            env_state = reset_fn(reset_rngs)
+            init_dones = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
+
+            time_state['timesteps'] = step_state[-1]
+            time_state['updates'] += 1
+
+            target_agent_params = jax.lax.cond(
+                time_state['updates'] % config['TARGET_UPDATE_INTERVAL'] == 0,
+                lambda _: jax.tree_util.tree_map(lambda x: jnp.copy(x), train_state.params),
+                lambda _: target_agent_params,
+                operand=None
+            )
+
+            # TESTING AND METRICS
+            rng, _rng = jax.random.split(rng)
+            test_metrics = jax.lax.cond(
+                time_state['updates'] % (config["TEST_INTERVAL"] // config["NUM_STEPS"] // config["NUM_ENVS"]) == 0,
+                lambda _: get_greedy_metrics(_rng, train_state.params, time_state),
+                lambda _: test_metrics,
+                operand=None
+            )
+
+            rng, _rng = jax.random.split(rng)
+            runner_state = (
+                train_state,
+                target_agent_params,
+                env_state,
+                buffer_state,
+                time_state,
+                init_obs,
+                init_dones,
+                test_metrics,
+                rng
+            )
+
+            metrics = {
+                'timesteps': time_state['timesteps']*config['NUM_ENVS'],
+                'updates': time_state['updates'],
+                'loss': loss,
+                'rewards': jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0).mean(), traj_batch.rewards),
+                'test_metrics': test_metrics
+            }
+
+            return runner_state, metrics
+
+        def get_greedy_metrics(rng, params, time_state):
+            """Help function to test greedy policy during training"""
+            def _greedy_env_step(step_state, unused):
+                params, env_state, last_obs, last_dones, hstate, rng = step_state
+                rng, key_s = jax.random.split(rng)
+                obs_ = last_obs[np.newaxis, :]
+                dones_ = last_dones[np.newaxis, :]
+                hstate, mean, std = homogeneous_pass(params, hstate, obs_, dones_)
+                # Use mean as the action for deterministic evaluation
+                action = mean.squeeze(0)
+                env_state = test_step_fn(env_state, action)
+                step_state = (params, env_state, env_state.obs, env_state.done.astype(bool), hstate, rng)
+                return step_state, (env_state.reward, env_state.done)
+
+            rng, _rng = jax.random.split(rng)
+            test_rngs = jax.random.split(_rng, config["NUM_TEST_ENVS"])
+            env_state = test_reset_fn(test_rngs)
+
+            init_dones = jnp.zeros((config["NUM_TEST_ENVS"]), dtype=bool)
+            hstate = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], config["NUM_TEST_ENVS"])
+            step_state = (params, env_state, env_state.obs, init_dones, hstate, rng)
+
+            step_state, (rewards, dones) = jax.lax.scan(
+                _greedy_env_step, step_state, None, config["NUM_STEPS"]
+            )
+
+            episode_returns = rewards.sum(axis=0)
+            return {'test_returns': episode_returns.mean()}
+
+        time_state = {'timesteps': jnp.array(0), 'updates': jnp.array(0)}
+        rng, _rng = jax.random.split(rng)
+        test_metrics = get_greedy_metrics(_rng, train_state.params, time_state)
+        
+        rng, _rng = jax.random.split(rng)
+        runner_state = (
+            train_state,
+            target_agent_params,
+            env_state,
+            buffer_state,
+            time_state,
+            init_obs,
+            init_dones,
+            test_metrics,
+            _rng
+        )
+        runner_state, metrics = jax.lax.scan(
+            _update_step, runner_state, None, config["NUM_UPDATES"]
+        )
+        return {'runner_state': runner_state, 'metrics': metrics}
+    
     return train
 
-@hydra.main(version_base=None, config_path="config", config_name="dqn_config")
+
+@hydra.main(version_base=None, config_path="./config", config_name="dqn_config")
 def main(config):
     config = OmegaConf.to_container(config)
 
+    print('Config:\n', OmegaConf.to_yaml(config))
+
+    env_name = config["ENV_NAME"]
+
     wandb.init(
         entity=config["ENTITY"],
-        project=config["PROJECT_PREFIX"] + config["ENV_NAME"] + "_DQN",
-        tags=["DQN"],
+        project=config["PROJECT"],
+        tags=[
+            "DQN",
+            env_name.upper(),
+            "RNN",
+            f"jax_{jax.__version__}",
+        ],
+        name=f'dqn_{env_name}',
         config=config,
-        mode=config["WANDB_MODE"],
+        # mode=config["WANDB_MODE"],
+        mode='disabled',
     )
     
-    train = make_train(config)
     rng = jax.random.PRNGKey(config["SEED"])
-    rewards = train(rng)
-    print("Training finished")
+    rngs = jax.random.split(rng, config["NUM_SEEDS"])
+    train_vjit = jax.jit(jax.vmap(make_train(config)))
     
-    # Save the final model after training
-    # save_model(dqn_agent.params, config["MODEL_SAVE_PATH"], 'dqn_final.msgpack')
+    start_time = time.time()
+    outs = jax.block_until_ready(train_vjit(rngs))
+    end_time = time.time()
+    total_time = end_time - start_time
+    print(f"Time for training: {total_time:.2f}")
+    
+    if config['SAVE_PATH'] is not None:
+        def save_params(params: dict, filename: Union[str, os.PathLike]) -> None:
+            flattened_dict = flatten_dict(params, sep=',')
+            save_file(flattened_dict, filename)
+
+        model_state = outs['runner_state'][0]
+        params = jax.tree_util.tree_map(lambda x: x[0], model_state.params)
+        save_dir = os.path.join(config['SAVE_PATH'], env_name)
+        os.makedirs(save_dir, exist_ok=True)
+        save_params(params, f'{save_dir}/dqn.safetensors')
+        print(f'Parameters of first batch saved in {save_dir}/dqn.safetensors')
+        
+    plot_rewards(outs["metrics"], f'{env_name}_dqn', config["NUM_SEEDS"])
+
 
 if __name__ == "__main__":
     main()

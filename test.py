@@ -21,18 +21,14 @@ import d4rl
 
 from brax import envs
 import os
-'''
-os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-env = gym.make("halfcheetah-expert-v2")
 
-# env = envs.get_environment('halfcheetah')
 
-dataset = env.get_dataset()
-print(dataset['rewards'].mean())
+env1 = gym.make("halfcheetah-medium-expert-v2")
+env2 = envs.create("halfcheetah")
+env3 = envs.get_environment("halfcheetah")
 
-print(print)
-'''
-
-# keys
-print(envs._envs.keys())
+print(env1.action_space.shape[0])
+print(env2.action_size)
+print(env3.action_size)

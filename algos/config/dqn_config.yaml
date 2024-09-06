@@ -1,32 +1,42 @@
 "DEBUG": False
 "DISABLE_JIT": False
-"SEED": 3
-"ENV_NAME": "hopper-medium-expert-v2"
-"TEST_ENV_NAME": "hopper"
-# "ENV_NAME": "antmaze-umaze-v2"
-# "TEST_ENV_NAME": "ant"
+"NUM_SEEDS": 5
+"SEED": 30
+"ENV_NAME": "halfcheetah"
+"TEST_ENV_NAME": "halfcheetah"
 "ENV_KWARGS": {}
 
-"LR": 1e-3
+
+# where to save the params (if None, will not save)
+"SAVE_PATH": "results/DQN/dqn_network"
+
+
+# other params
+"NUM_ENVS": 8
+"NUM_STEPS": 256
+"BUFFER_SIZE": 1024
+"BUFFER_BATCH_SIZE": 32
+"TOTAL_TIMESTEPS": 5e6
+"AGENT_HIDDEN_DIM": 64
+"AGENT_INIT_SCALE": 2.
+"MAX_GRAD_NORM": 10
+"TARGET_UPDATE_INTERVAL": 200
+"LR": 0.0005
 "LR_LINEAR_DECAY": False
-"MAX_GRAD_NORM": 25
-"TOTAL_TIMESTEPS": 1e7
-"NUM_STEPS": 128
-"NUM_ENVS": 128
-"NUM_EPOCHS": 100
-# "NUM_TEST_ENVS": 10
-"NUM_TEST_ENVS": 128
-"NUM_TEST_STEPS": 130
-"BATCH_SIZE": 10
-"TEST_INTERVAL": 1
-"SHUFFLE_SEED": 5
-"RENDER": True
+"EPS_ADAM": 0.0001
+"WEIGHT_DECAY_ADAM": 0.00001
+"TD_LAMBDA_LOSS": False
+"TD_LAMBDA": 0.6
+"GAMMA": 0.99
+"VERBOSE": False
+"WANDB_ONLINE_REPORT": True
+"NUM_TEST_ENVS": 32
+"TEST_INTERVAL": 50000
 
 "WANDB_MODE": "online"  # enable this line in training
 "ENTITY": "marlhf"
-"PROJECT": "IL_offline"
-"TUNE_PROJECT": "IL_offline_tune1"
+"PROJECT": "DQN"
 "PROJECT_PREFIX": ""
 
-"STUDENT_NETWORK_HIDDEN": 128
-"STUDENT_NETWORK_SAVE_PATH": "results/IL_configs/student_network"
+"IL_NETWORK_HIDDEN": 128
+"IL_NETWORK_SAVE_PATH": "results/IL_configs/student_network"
