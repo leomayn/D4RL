@@ -79,6 +79,16 @@ class AgentRNN(nn.Module):
 
         return hidden, mean, std
 
+class EpsilonGreedy:
+    def __init__(self, start_e: float, end_e: float, duration: int):
+        self.start_e = start_e
+        self.end_e = end_e
+        self.duration = duration
+        self.slope = (end_e - start_e) / duration
+
+    def get_epsilon(self, t: int):
+        epsilon = self.start_e + self.slope * t
+        return max(self.end_e, epsilon)
 
 def policy_extractor(key, mean, exploration=True, epsilon=0.1):
     """
@@ -215,6 +225,10 @@ def make_train(config):
         return
 
     # End of IL
+    
+    # epsilon greedy
+    
+    epsilon_greedy = EpsilonGreedy(start_e=config["EPSILON_START"], end_e=config["EPSILON_FINISH"], duration=config["EPSILON_ANNEAL_TIME"])
 
     def train(rng):
         # INIT ENV
@@ -297,7 +311,8 @@ def make_train(config):
 
                 # SELECT ACTION
                 hstate, mean, std = homogeneous_pass(params, hstate, obs_, dones_)
-                action = policy_extractor(key_a, mean, exploration=True, epsilon=config.get('EXPLORATION_NOISE', 0.1)).squeeze(0)
+                epsilon = epsilon_greedy.get_epsilon(t)
+                action = policy_extractor(key_a, mean, exploration=True, epsilon=epsilon).squeeze(0)
                 reward, il_h_state = generate_reward(il_model, il_params, obs_, action, dones_, il_h_state)
 
                 # STEP ENV
