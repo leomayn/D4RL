@@ -5,8 +5,9 @@ import numpy as np
 from functools import partial
 from typing import NamedTuple, Union
 import time
+import gym
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 os.environ['PYOPENGL_PLATFORM'] = 'egl'
 os.environ['MUJOCO_GL'] = 'egl'
 os.environ['D4RL_SUPPRESS_IMPORT_ERROR'] = '1'
@@ -20,8 +21,8 @@ import flashbax as fbx
 import wandb
 import hydra
 from omegaconf import OmegaConf
-from safetensors.flax import save_file
-from flax.traverse_util import flatten_dict
+from safetensors.flax import save_file, load_file
+from flax.traverse_util import flatten_dict, unflatten_dict
 import matplotlib.pyplot as plt
 
 from flax import serialization
@@ -29,6 +30,8 @@ from flax import serialization
 from brax import envs
 
 from utils.networks import ActorRNN
+
+import imageio
 
 class ScannedRNN(nn.Module):
     @partial(
@@ -76,6 +79,7 @@ class AgentRNN(nn.Module):
 
         return hidden, mean, std
 
+
 def policy_extractor(key, mean, exploration=True, epsilon=0.1):
     """
     Extract continuous actions based on the mean action with exploration noise.
@@ -98,6 +102,59 @@ def policy_extractor(key, mean, exploration=True, epsilon=0.1):
 
     return actions
 
+def save_video(frames, filename='trajectory.mp4'):
+    # Append .mp4 to ensure the correct format
+    if not filename.endswith('.mp4'):
+        filename += '.mp4'
+    
+    # Ensure the frames are in the correct format (e.g., numpy arrays, correct color channels)
+    with imageio.get_writer(filename, fps=20, format='mp4') as writer:
+        for frame in frames:
+            writer.append_data(frame)
+    print(f"Video saved as {filename}")
+
+
+def get_rollout(params, config):
+    env = envs.get_environment(config["TEST_ENV_NAME"])
+    
+    agent = AgentRNN(action_dim=env.action_size, hidden_dim=config["AGENT_HIDDEN_DIM"], init_scale=config['AGENT_INIT_SCALE'])
+    
+    reset_fn = jax.jit(env.reset)
+    step_fn = jax.jit(env.step)
+    
+    key = jax.random.PRNGKey(0)
+    key, key_r = jax.random.split(key)
+    state = reset_fn(key_r)
+    obs = state.obs
+    done = state.done
+    hstate = ScannedRNN.initialize_carry(config["AGENT_HIDDEN_DIM"], 1)
+    
+    def homogeneous_pass(params, hidden_state, obs, dones):
+            hidden_state, mean, std = agent.apply(params, hidden_state, (obs, dones))
+            return hidden_state, mean, std
+        
+    network_params = params
+    rollout = [state.pipeline_state]
+    timestep = 0
+    # grab a trajectory
+    frames = []
+    # while not done:
+    for i in range(config["NUM_STEPS"]):
+        key, key_a = jax.random.split(key)
+        obs = obs[np.newaxis, np.newaxis, :]
+        done = jnp.array(done)[np.newaxis, np.newaxis]
+        hstate, mean, std = homogeneous_pass(params, hstate, obs, done)
+        action = mean.squeeze(0)
+        action = action.squeeze()
+        state = step_fn(state, action)
+        done = state.done
+        obs = state.obs
+        rollout.append(state.pipeline_state)
+        
+    frames = env.render(trajectory=rollout, height=240, width=320)
+
+    return frames
+
 class Transition(NamedTuple):
     obs: jnp.ndarray
     actions: jnp.ndarray
@@ -112,23 +169,26 @@ def generate_reward(il_model, il_params, obs, action, done, il_h_state):
     reward = jnp.squeeze(reward, axis=0)
     return (reward, il_h_state)
 
-def plot_rewards(metrics, filename, num_seeds):
+def plot_rewards(metrics, filename, num_seeds, alg_name, env_name):
     test_metrics = metrics["test_metrics"]
-    test_returns = test_metrics["test_returns"].mean(-1).reshape((num_seeds, -1))
-
-    reward_mean = test_returns.mean(0)
-    reward_std = test_returns.std(0) / np.sqrt(num_seeds)
+    test_returns = test_metrics["test_returns"]
+    
+    reward_mean = test_returns.mean(axis=0)
+    reward_std = test_returns.std(axis=0) / np.sqrt(num_seeds)
     
     plt.plot(reward_mean)
     plt.fill_between(range(len(reward_mean)), reward_mean - reward_std, reward_mean + reward_std, alpha=0.2)
     plt.xlabel("Update Step")
     plt.ylabel("Return")
+    plt.title(f"{env_name}_{alg_name}")
     plt.savefig(f'{filename}.png')
 
 def make_train(config):
     config["NUM_UPDATES"] = (
         config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
     )
+    
+    print("num_updates: ", config["NUM_UPDATES"])
     
     env = envs.create(config["ENV_NAME"])
     test_env = envs.create(config["TEST_ENV_NAME"])
@@ -221,8 +281,6 @@ def make_train(config):
 
         # HOMOGENEOUS PASS FUNCTION
         def homogeneous_pass(params, hidden_state, obs, dones):
-            print("obs ", obs.shape)
-            print("dones ", dones.shape)
             hidden_state, mean, std = agent.apply(params, hidden_state, (obs, dones))
             return hidden_state, mean, std
 
@@ -327,7 +385,27 @@ def make_train(config):
                 operand=None
             )
 
-            rng, _rng = jax.random.split(rng)
+            # update the returning metrics
+            metrics = {
+                'timesteps': time_state['timesteps']*config['NUM_ENVS'],
+                'updates' : time_state['updates'],
+                'loss': loss,
+                'rewards': traj_batch.rewards.sum(),
+            }
+            metrics['test_metrics'] = test_metrics # add the test metrics dictionary
+
+            if config.get('WANDB_ONLINE_REPORT', False):
+                def callback(metrics, infos):
+                    wandb.log(
+                        {
+                            "returns": metrics['rewards'],
+                            "timestep": metrics['timesteps'],
+                            "updates": metrics['updates'],
+                            "loss": metrics['loss'],
+                        }
+                    )
+                jax.debug.callback(callback, metrics, traj_batch.infos)
+
             runner_state = (
                 train_state,
                 target_agent_params,
@@ -339,14 +417,6 @@ def make_train(config):
                 test_metrics,
                 rng
             )
-
-            metrics = {
-                'timesteps': time_state['timesteps']*config['NUM_ENVS'],
-                'updates': time_state['updates'],
-                'loss': loss,
-                'rewards': jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0).mean(), traj_batch.rewards),
-                'test_metrics': test_metrics
-            }
 
             return runner_state, metrics
 
@@ -362,24 +432,38 @@ def make_train(config):
                 action = mean.squeeze(0)
                 env_state = test_step_fn(env_state, action)
                 step_state = (params, env_state, env_state.obs, env_state.done.astype(bool), hstate, rng)
-                return step_state, (env_state.reward, env_state.done)
-
+                return step_state, (env_state.reward, env_state.done, env_state.info)
             rng, _rng = jax.random.split(rng)
-            test_rngs = jax.random.split(_rng, config["NUM_TEST_ENVS"])
-            env_state = test_reset_fn(test_rngs)
-
-            init_dones = jnp.zeros((config["NUM_TEST_ENVS"]), dtype=bool)
-            hstate = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], config["NUM_TEST_ENVS"])
-            step_state = (params, env_state, env_state.obs, init_dones, hstate, rng)
-
-            step_state, (rewards, dones) = jax.lax.scan(
+            reset_rngs = jax.random.split(_rng, config["NUM_TEST_EPISODES"])
+            env_state = test_reset_fn(reset_rngs)
+            init_dones = jnp.zeros((config["NUM_TEST_EPISODES"]), dtype=bool)
+            rng, _rng = jax.random.split(rng)
+            hstate = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], config["NUM_TEST_EPISODES"])
+            step_state = (
+                params,
+                env_state,
+                env_state.obs,
+                init_dones,
+                hstate, 
+                _rng,
+            )
+            step_state, (rewards, dones, infos) = jax.lax.scan(
                 _greedy_env_step, step_state, None, config["NUM_STEPS"]
             )
+            first_returns = rewards.sum()
+            metrics = {
+                'test_returns': first_returns,# episode returns
+            }
+            if config.get('VERBOSE', False):
+                def callback(timestep, val):
+                    print(f"Timestep: {timestep}, return: {val}")
+                jax.debug.callback(callback, time_state['timesteps']*config['NUM_ENVS'], first_returns.mean())
+            return metrics
 
-            episode_returns = rewards.sum(axis=0)
-            return {'test_returns': episode_returns.mean()}
-
-        time_state = {'timesteps': jnp.array(0), 'updates': jnp.array(0)}
+        time_state = {
+            'timesteps':jnp.array(0),
+            'updates':  jnp.array(0)
+        }
         rng, _rng = jax.random.split(rng)
         test_metrics = get_greedy_metrics(_rng, train_state.params, time_state)
         
@@ -403,6 +487,27 @@ def make_train(config):
     return train
 
 
+
+# debug functions
+def debug_plot_rewards(metrics, filename, num_seeds):
+    test_metrics = metrics["test_metrics"]
+    print(f"Test Metrics: {test_metrics}")  # Debug print to see the full structure of test metrics
+
+    test_returns = test_metrics["test_returns"]
+    print(f"Test Returns (before reshape): {test_returns.shape}")  # Debug to check test returns before reshaping
+
+    reward_mean = test_returns.mean(axis=0)
+    reward_std = test_returns.std(axis=0) / np.sqrt(num_seeds)
+
+    print(f"Reward Mean: {reward_mean.shape}")  # Debug to check reward mean
+    print(f"Reward Std: {reward_std.shape}")    # Debug to check reward standard deviation
+
+    plt.plot(reward_mean)
+    plt.fill_between(range(len(reward_mean)), reward_mean - reward_std, reward_mean + reward_std, alpha=0.2)
+    plt.xlabel("Update Step")
+    plt.ylabel("Return")
+    plt.savefig(f'{filename}.png')
+
 @hydra.main(version_base=None, config_path="./config", config_name="dqn_config")
 def main(config):
     config = OmegaConf.to_container(config)
@@ -410,6 +515,8 @@ def main(config):
     print('Config:\n', OmegaConf.to_yaml(config))
 
     env_name = config["ENV_NAME"]
+    
+    config["NUM_STEPS"] = gym.make(config["GYM_NAME"])._max_episode_steps
 
     wandb.init(
         entity=config["ENTITY"],
@@ -426,30 +533,64 @@ def main(config):
         mode='disabled',
     )
     
-    rng = jax.random.PRNGKey(config["SEED"])
-    rngs = jax.random.split(rng, config["NUM_SEEDS"])
-    train_vjit = jax.jit(jax.vmap(make_train(config)))
     
-    start_time = time.time()
-    outs = jax.block_until_ready(train_vjit(rngs))
-    end_time = time.time()
-    total_time = end_time - start_time
-    print(f"Time for training: {total_time:.2f}")
     
-    if config['SAVE_PATH'] is not None:
-        def save_params(params: dict, filename: Union[str, os.PathLike]) -> None:
-            flattened_dict = flatten_dict(params, sep=',')
-            save_file(flattened_dict, filename)
-
-        model_state = outs['runner_state'][0]
-        params = jax.tree_util.tree_map(lambda x: x[0], model_state.params)
-        save_dir = os.path.join(config['SAVE_PATH'], env_name)
-        os.makedirs(save_dir, exist_ok=True)
-        save_params(params, f'{save_dir}/dqn.safetensors')
-        print(f'Parameters of first batch saved in {save_dir}/dqn.safetensors')
+    if config["TRAIN"]:
+        rng = jax.random.PRNGKey(config["SEED"])
+        rngs = jax.random.split(rng, config["NUM_SEEDS"])
+        train_vjit = jax.jit(jax.vmap(make_train(config)))
         
-    plot_rewards(outs["metrics"], f'{env_name}_dqn', config["NUM_SEEDS"])
+        start_time = time.time()
+        outs = jax.block_until_ready(train_vjit(rngs))
+        end_time = time.time()
+        total_time = end_time - start_time
+        print(f"Time for training: {total_time:.2f}")
+        
+        if config['SAVE_PATH'] is not None:
+            def save_params(params: dict, filename: Union[str, os.PathLike]) -> None:
+                flattened_dict = flatten_dict(params, sep=',')
+                save_file(flattened_dict, filename)
 
+            model_state = outs['runner_state'][0]
+            params = jax.tree_util.tree_map(lambda x: x[0], model_state.params)
+            save_dir = os.path.join(config['SAVE_PATH'], env_name)
+            os.makedirs(save_dir, exist_ok=True)
+            save_params(params, f'{save_dir}/dqn.safetensors')
+            print(f'Parameters of first batch saved in {save_dir}/dqn.safetensors')
+            
+        plot_rewards(outs["metrics"], f'{env_name}_dqn', config["NUM_SEEDS"], config["ENV_NAME"], config["ALG_NAME"])
+    elif config["DEBUG"]:
+        config["TOTAL_TIMESTEPS"] = config["DEBUG_STEPS"]
+        rng = jax.random.PRNGKey(config["SEED"])
+        rngs = jax.random.split(rng, config["NUM_SEEDS"])
+        train_vjit = jax.jit(jax.vmap(make_train(config)))
+        
+        start_time = time.time()
+        outs = jax.block_until_ready(train_vjit(rngs))
+        end_time = time.time()
+        total_time = end_time - start_time
+        print(f"Time for training: {total_time:.2f}")
+        
+        debug_plot_rewards(outs["metrics"], f'{env_name}_dqn', config["NUM_SEEDS"])
+    else:
+        # Load model parameters
+        def load_params(filename: Union[str, os.PathLike]) -> dict:
+            # Load the flattened dictionary from file
+            flattened_dict = load_file(filename)  # Assuming you have a load_file function
+            # Reconstruct the tree structure
+            params = unflatten_dict(flattened_dict, sep=',')
+            return params
+        save_dir = os.path.join(config['SAVE_PATH'], env_name)    
+        filename = f'{save_dir}/dqn.safetensors'
+        params = load_params(filename)
+    
+    if config["RENDER"]:
+        start_time = time.time()
+        frames = get_rollout(params, config)
+        save_video(frames, f'{config["ENV_NAME"]}_{config["ALG_NAME"]}.mp4')
+        end_time = time.time()
+        total_time = end_time - start_time
+        print(f"Time for rendering: {total_time:.2f}")
 
 if __name__ == "__main__":
     main()

@@ -30,7 +30,7 @@
 "GAMMA": 0.99
 "VERBOSE": False
 "WANDB_ONLINE_REPORT": True
-"NUM_TEST_ENVS": 32
+"NUM_TEST_EPISODES": 32
 "TEST_INTERVAL": 50000
 
 "WANDB_MODE": "online"  # enable this line in training
@@ -40,3 +40,9 @@
 
 "IL_NETWORK_HIDDEN": 128
 "IL_NETWORK_SAVE_PATH": "results/IL_configs/student_network"
+
+"TRAIN": True
+"GYM_NAME": "HalfCheetah"
+"DEBUG_STEPS": 10e4
+"RENDER": True
+"ALG_NAME": "dqn"

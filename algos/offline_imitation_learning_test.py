@@ -1,5 +1,5 @@
 import os 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 os.environ['PYOPENGL_PLATFORM'] = 'egl'
 os.environ['MUJOCO_GL'] = 'egl'
 os.environ['D4RL_SUPPRESS_IMPORT_ERROR'] = '1'
@@ -36,6 +36,10 @@ class IL_Transition(NamedTuple):
     info: jnp.ndarray
     
 def save_video(frames, filename='trajectory.mp4'):
+    # Append .mp4 to ensure the correct format
+    if not filename.endswith('.mp4'):
+        filename += '.mp4'
+    
     # Ensure the frames are in the correct format (e.g., numpy arrays, correct color channels)
     with imageio.get_writer(filename, fps=20, format='mp4') as writer:
         for frame in frames:
@@ -45,7 +49,7 @@ def save_video(frames, filename='trajectory.mp4'):
 def get_rollout(params, config):
     env = envs.get_environment(config["TEST_ENV_NAME"])
     
-    student_model = ActorRNN(action_dim=gym.make(config["ENV_NAME"]).action_space.shape[0],
+    student_model = ActorRNN(action_dim=env.action_size,
                              config=config)
     
     reset_fn = jax.jit(env.reset)
@@ -63,7 +67,7 @@ def get_rollout(params, config):
     # grab a trajectory
     frames = []
     # while not done:
-    for i in range(5000):
+    for i in range(1000):
         key, key_a = jax.random.split(key)
         obs = obs[np.newaxis, np.newaxis, :]
         done = jnp.array(done)[np.newaxis, np.newaxis]
@@ -311,47 +315,48 @@ def main(config):
         mode='disabled',
     )
     
-    '''
-    # Load model parameters
-    student_model = ActorRNN(action_dim=gym.make(config["ENV_NAME"]).action_space.shape[0], config=config)
-    rng = jax.random.PRNGKey(0)
-    _s_init_x = (
-        jnp.zeros((1, 1, gym.make(config["ENV_NAME"]).observation_space.shape[0])),
-        jnp.zeros((1, 1))
-    )
-    _s_init_h = ScannedRNN.initialize_carry(1, config["STUDENT_NETWORK_HIDDEN"])
-
-    init_params = student_model.init(rng, _s_init_h, _s_init_x)
-
-    params_path = os.path.join(config["STUDENT_NETWORK_SAVE_PATH"], 'final.msgpack')
-    if os.path.exists(params_path):
-        with open(params_path, "rb") as f:
-            params_bytes = f.read()
-        params = serialization.from_bytes(init_params, params_bytes)
-        print(f"Loaded parameters from {params_path}")
+    if config["TRAIN"]:
+        train = make_train(config)
+        with jax.disable_jit(config["DISABLE_JIT"]):
+            jit_train = jax.jit(train)
+            rng = jax.random.PRNGKey(config["SEED"])
+            output = jit_train(rng)
+        print("training finished")
+        train_state = jax.tree_util.tree_map(lambda x: x[0], output["runner_state"][0])
+        params = train_state.params
     else:
-        print(f"Parameters file not found at {params_path}. Please check the path and try again.")
-        return
+        # Load model parameters
+        student_model = ActorRNN(action_dim=gym.make(config["ENV_NAME"]).action_space.shape[0], config=config)
+        rng = jax.random.PRNGKey(0)
+        _s_init_x = (
+            jnp.zeros((1, 1, gym.make(config["ENV_NAME"]).observation_space.shape[0])),
+            jnp.zeros((1, 1))
+        )
+        _s_init_h = ScannedRNN.initialize_carry(1, config["STUDENT_NETWORK_HIDDEN"])
+
+        init_params = student_model.init(rng, _s_init_h, _s_init_x)
+
+        params_path = os.path.join(config["STUDENT_NETWORK_SAVE_PATH"], 'final.msgpack')
+        if os.path.exists(params_path):
+            with open(params_path, "rb") as f:
+                params_bytes = f.read()
+            params = serialization.from_bytes(init_params, params_bytes)
+            print(f"Loaded parameters from {params_path}")
+        else:
+            print(f"Parameters file not found at {params_path}. Please check the path and try again.")
+            return
         
-    '''
-    train = make_train(config)
-    with jax.disable_jit(config["DISABLE_JIT"]):
-        jit_train = jax.jit(train)
-        rng = jax.random.PRNGKey(config["SEED"])
-        output = jit_train(rng)
-    print("training finished")
-    train_state = jax.tree_util.tree_map(lambda x: x[0], output["runner_state"][0])
-    params = train_state.params
     
     
     # rendering code
     
-    start_time = time.time()
-    frames = get_rollout(params, config)
-    save_video(frames, config["ENV_NAME"])
-    end_time = time.time()
-    total_time = end_time - start_time
-    print(f"Time for rendering: {total_time:.2f}")
+    if config["RENDER"]:
+        start_time = time.time()
+        frames = get_rollout(params, config)
+        save_video(frames, f'{config["ENV_NAME"]}_{config["ALG_NAME"]}.mp4')
+        end_time = time.time()
+        total_time = end_time - start_time
+        print(f"Time for rendering: {total_time:.2f}")
     
 
 
