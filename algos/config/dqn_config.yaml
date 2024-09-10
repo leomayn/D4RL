@@ -1,4 +1,4 @@
-"DEBUG": False
+"DEBUG": True
 "DISABLE_JIT": False
 "NUM_SEEDS": 5
 "SEED": 30
@@ -44,8 +44,8 @@
 "IL_NETWORK_HIDDEN": 128
 "IL_NETWORK_SAVE_PATH": "results/IL_configs/student_network"
 
-"TRAIN": True
+"TRAIN": False
 "GYM_NAME": "HalfCheetah"
 "DEBUG_STEPS": 10e4
-"RENDER": True
+"RENDER": False
 "ALG_NAME": "dqn"

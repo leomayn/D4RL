@@ -29,9 +29,11 @@ from flax import serialization
 
 from brax import envs
 
-from utils.networks import ActorRNN
+from typing import Sequence, Dict
 
 import imageio
+
+import distrax
 
 class ScannedRNN(nn.Module):
     @partial(
@@ -59,58 +61,84 @@ class ScannedRNN(nn.Module):
         return nn.GRUCell(hidden_size).initialize_carry(jax.random.PRNGKey(0), (*batch_size, hidden_size))
 
 
-class AgentRNN(nn.Module):
+class ActorRNN(nn.Module):
+    action_dim: Sequence[int]
+    config: Dict
+
+    @nn.compact
+    def __call__(self, hidden, x):
+        
+        if len(x) == 3:
+            obs, dones, avail_actions = x
+        else:
+            obs, dones = x
+            avail_actions = jnp.ones((obs.shape[0], obs.shape[1], self.action_dim))
+        embedding = nn.Dense(
+            128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(obs)
+        embedding = nn.relu(embedding)
+
+        rnn_in = (embedding, dones)
+        
+
+        
+        hidden, embedding = ScannedRNN()(hidden, rnn_in)
+
+        actor_mean = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(
+            embedding
+        )
+        actor_mean = nn.relu(actor_mean)
+        actor_mean = nn.Dense(
+            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+        )(actor_mean)
+        
+        # unavail_actions = 1 - avail_actions
+        # action_logits = actor_mean - (unavail_actions * 1e10)
+        
+        actor_log_std = self.param('actor_log_std', lambda key, shape: -0.5 * jnp.ones(shape), (self.action_dim,))
+        action_std = jnp.exp(actor_log_std)
+
+        # pi = distrax.Categorical(logits=action_logits)
+        pi = distrax.MultivariateNormalDiag(loc=actor_mean, scale_diag=action_std)
+
+        return hidden, pi
+
+class Qnetwork(nn.Module):
     action_dim: int
     hidden_dim: int
     init_scale: float
 
     @nn.compact
-    def __call__(self, hidden, x):
-        obs, dones = x
-        embedding = nn.Dense(self.hidden_dim, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(obs)
+    def __call__(self, obs, action):
+        # Concatenate the observation and action
+        x = jnp.concatenate([obs, action], axis=-1)
+        
+        # Pass the concatenated input through the network
+        embedding = nn.Dense(self.hidden_dim, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(x)
         embedding = nn.relu(embedding)
+        
+        # Compute Q-values
+        q_vals = nn.Dense(1, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(embedding)
 
-        rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN()(hidden, rnn_in)
+        return jnp.squeeze(q_vals, axis=-1)
 
-        mean = nn.Dense(self.action_dim, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(embedding)
-        log_std = nn.Dense(self.action_dim, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(embedding)
-        std = jnp.exp(log_std)  # Exponentiate to get the standard deviation
 
-        return hidden, mean, std
+    
+class Vnetwork(nn.Module):
+    hidden_dim: int  # Add a hidden dimension for consistency
 
-class EpsilonGreedy:
-    def __init__(self, start_e: float, end_e: float, duration: int):
-        self.start_e = start_e
-        self.end_e = end_e
-        self.duration = duration
-        self.slope = (end_e - start_e) / duration
+    @nn.compact
+    def __call__(self, x):
+        world_state = x
+        embedding = nn.Dense(self.hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(world_state)
+        embedding = nn.relu(embedding)
+        
+        critic = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
+        critic = nn.relu(critic)
+        critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(critic)
+        
+        return jnp.squeeze(critic, axis=-1)
 
-    def get_epsilon(self, t: int):
-        epsilon = self.start_e + self.slope * t
-        return max(self.end_e, epsilon)
-
-def policy_extractor(key, mean, exploration=True, epsilon=0.1):
-    """
-    Extract continuous actions based on the mean action with exploration noise.
-
-    mean: Mean action predicted by the network.
-    key: JAX random key for any stochastic operation (like sampling).
-    exploration: Whether to apply exploration noise.
-    epsilon: The scale of exploration noise (how much noise to add).
-
-    Returns:
-    Continuous actions of shape (batch_size, action_dim).
-    """
-    if exploration:
-        # Apply Gaussian noise for exploration, scaled by epsilon
-        action_noise = jax.random.normal(key, mean.shape) * epsilon
-        actions = mean + action_noise
-    else:
-        # Simply use the mean as the deterministic action output
-        actions = mean
-
-    return actions
 
 def save_video(frames, filename='trajectory.mp4'):
     # Append .mp4 to ensure the correct format
@@ -127,7 +155,7 @@ def save_video(frames, filename='trajectory.mp4'):
 def get_rollout(params, config):
     env = envs.get_environment(config["TEST_ENV_NAME"])
     
-    agent = AgentRNN(action_dim=env.action_size, hidden_dim=config["AGENT_HIDDEN_DIM"], init_scale=config['AGENT_INIT_SCALE'])
+    policy_actor = ActorRNN(action_dim=env.action_size, config=config)
     
     reset_fn = jax.jit(env.reset)
     step_fn = jax.jit(env.step)
@@ -140,7 +168,7 @@ def get_rollout(params, config):
     hstate = ScannedRNN.initialize_carry(config["AGENT_HIDDEN_DIM"], 1)
     
     def homogeneous_pass(params, hidden_state, obs, dones):
-            hidden_state, mean, std = agent.apply(params, hidden_state, (obs, dones))
+            hidden_state, mean, std = policy_actor.apply(params, hidden_state, (obs, dones))
             return hidden_state, mean, std
         
     network_params = params
@@ -225,10 +253,6 @@ def make_train(config):
         return
 
     # End of IL
-    
-    # epsilon greedy
-    
-    epsilon_greedy = EpsilonGreedy(start_e=config["EPSILON_START"], end_e=config["EPSILON_FINISH"], duration=config["EPSILON_ANNEAL_TIME"])
 
     def train(rng):
         # INIT ENV
@@ -275,11 +299,14 @@ def make_train(config):
         buffer_state = buffer.init(sample_traj_unbatched)
 
         # INIT NETWORK
-        agent = AgentRNN(action_dim=env.action_size, hidden_dim=config["AGENT_HIDDEN_DIM"], init_scale=config['AGENT_INIT_SCALE'])
+        policy_actor = ActorRNN(action_dim=env.action_size, config=config)
+        # q network, v network
+        q_network = Qnetwork(action_dim=env.action_size, hidden_dim=config["AGENT_HIDDEN_DIM"], init_scale=config['AGENT_INIT_SCALE'])
+        v_network = Vnetwork(action_dim=env.action_size, activation=config["ACTIVATION"])
         rng, _rng = jax.random.split(rng)
         init_x = (jnp.zeros((1, 1, env.observation_size)), jnp.zeros((1, 1)))
         init_hs = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], 1)
-        network_params = agent.init(_rng, init_hs, init_x)
+        network_params = policy_actor.init(_rng, init_hs, init_x)
 
         # INIT TRAIN STATE AND OPTIMIZER
         tx = optax.chain(
@@ -287,20 +314,15 @@ def make_train(config):
             optax.adam(learning_rate=config['LR'], eps=config['EPS_ADAM']),
         )
         train_state = TrainState.create(
-            apply_fn=agent.apply,
+            apply_fn=policy_actor.apply,
             params=network_params,
             tx=tx,
         )
         target_agent_params = jax.tree_util.tree_map(lambda x: jnp.copy(x), train_state.params)
 
-        # HOMOGENEOUS PASS FUNCTION
-        def homogeneous_pass(params, hidden_state, obs, dones):
-            hidden_state, mean, std = agent.apply(params, hidden_state, (obs, dones))
-            return hidden_state, mean, std
-
         # TRAINING LOOP
         def _update_step(runner_state, unused):
-            train_state, target_agent_params, env_state, buffer_state, time_state, init_obs, init_dones, test_metrics, rng = runner_state
+            train_state, q_params, v_params, target_agent_params, env_state, buffer_state, time_state, init_obs, init_dones, test_metrics, rng = runner_state
 
             def _env_step(step_state, unused):
                 params, env_state, last_obs, last_dones, hstate, il_h_state, rng, t = step_state
@@ -310,9 +332,8 @@ def make_train(config):
                 dones_ = last_dones[np.newaxis, :]
 
                 # SELECT ACTION
-                hstate, mean, std = homogeneous_pass(params, hstate, obs_, dones_)
-                epsilon = epsilon_greedy.get_epsilon(t)
-                action = policy_extractor(key_a, mean, exploration=True, epsilon=epsilon).squeeze(0)
+                hstate, pi = policy_actor.apply(params, hstate, (obs_, dones_))
+                action = pi.sample(seed=rng)[0]
                 reward, il_h_state = generate_reward(il_model, il_params, obs_, action, dones_, il_h_state)
 
                 # STEP ENV
@@ -331,6 +352,7 @@ def make_train(config):
 
             step_state = (
                 train_state.params,
+                q_params,
                 env_state,
                 init_obs,
                 init_dones,
@@ -349,14 +371,100 @@ def make_train(config):
             buffer_state = buffer.add(buffer_state, buffer_traj_batch)
 
             # LEARNING PHASE
-            def _loss_fn(params, target_agent_params, init_hs, learn_traj):
-                obs_ = learn_traj.obs
-                dones_ = learn_traj.dones
-                hstate, mean, std = homogeneous_pass(params, init_hs, obs_, dones_)
-                _, target_mean, target_std = homogeneous_pass(target_agent_params, init_hs, obs_, dones_)
-                loss = jnp.mean(jnp.square(mean - target_mean))
-
+            
+            def v_function_loss(v_params, q_values, obs, dones, target_values, expectile):
+                """Compute the loss for the V-function using expectile regression."""
+                # V-function output: V(s) = E[Q(s, a)]
+                v_values = v_network(v_params, obs)
+                
+                # Asymmetric expectile regression loss
+                diff = target_values - v_values
+                loss = jnp.where(diff > 0, expectile * diff**2, (1 - expectile) * diff**2)
+                
+                return jnp.mean(loss)
+            
+            def q_function_loss(q_params, target_q, obs, actions, rewards, dones, next_obs, discount, v_params):
+                """Compute the loss for the Q-function."""
+                q_values = q_network(v_params, obs, actions)  # Q-function values
+                
+                # Get V-values for the next state (using target V network or current network)
+                next_v_values = v_network(v_params, next_obs)
+                
+                # Bellman target for the Q-function
+                bellman_target = rewards + discount * next_v_values * (1 - dones)
+                
+                # TD error
+                td_error = q_values - bellman_target
+                loss = jnp.mean(td_error**2)
+                
                 return loss
+            
+            def advantage_weighted_regression_loss(policy, params, obs, actions, advantages):
+                """AWR loss for policy extraction"""
+                # Get log probabilities of the actions under the current policy
+                log_probs = policy.apply(params, obs).log_prob(actions)
+                
+                # Calculate the weighted log-likelihood loss
+                weights = jnp.exp(advantages)  # Exponentiate the advantages to form the weights
+                loss = -jnp.mean(weights * log_probs)  # Negative log-likelihood weighted by the advantages
+                
+                return loss
+            
+            def compute_advantage(q_values, v_values):
+                """Compute the advantage as A(s, a) = Q(s, a) - V(s)"""
+                return q_values - v_values
+
+
+            def _loss_fn(params, target_agent_params, init_hs, learn_traj, expectile, discount, v_params, q_params):
+                obs_ = learn_traj.obs
+                actions_ = learn_traj.actions
+                rewards_ = learn_traj.rewards
+                dones_ = learn_traj.dones
+                next_obs_ = learn_traj.next_obs
+
+                # Q-function loss
+                q_loss = q_function_loss(
+                    q_params,
+                    target_agent_params,
+                    obs_,
+                    actions_,
+                    rewards_,
+                    dones_,
+                    next_obs_,
+                    discount,
+                    v_params
+                )
+
+                # V-function loss (expectile regression)
+                q_vals = q_network.apply(params, obs_, actions_)
+                v_loss = v_function_loss(
+                    v_params,
+                    q_vals,
+                    obs_,
+                    dones_,
+                    target_agent_params,
+                    expectile
+                )
+
+                # Compute advantage: A(s, a) = Q(s, a) - V(s)
+                v_values = v_network.apply(v_params, obs_)
+                advantages = compute_advantage(q_vals, v_values)
+
+                # Policy loss (AWR)
+                awr_loss = advantage_weighted_regression_loss(
+                    policy_actor,  # Replace with your policy network (if it's different)
+                    params,
+                    obs_,
+                    actions_,
+                    advantages
+                )
+
+                # Combine all losses
+                total_loss = q_loss + v_loss + awr_loss
+
+                return total_loss
+
+
 
             rng, _rng = jax.random.split(rng)
             learn_traj = buffer.sample(buffer_state, _rng).experience
@@ -367,7 +475,7 @@ def make_train(config):
             init_hs = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], config["BUFFER_BATCH_SIZE"])
 
             grad_fn = jax.value_and_grad(_loss_fn, has_aux=False)
-            loss, grads = grad_fn(train_state.params, target_agent_params, init_hs, learn_traj)
+            loss, grads = grad_fn(train_state.params, target_agent_params, init_hs, learn_traj, config['EXPECTILE'], config['GAMMA'], v_params)
             train_state = train_state.apply_gradients(grads=grads)
 
             rng, _rng = jax.random.split(rng)
@@ -436,9 +544,8 @@ def make_train(config):
                 rng, key_s = jax.random.split(rng)
                 obs_ = last_obs[np.newaxis, :]
                 dones_ = last_dones[np.newaxis, :]
-                hstate, mean, std = homogeneous_pass(params, hstate, obs_, dones_)
-                # Use mean as the action for deterministic evaluation
-                action = mean.squeeze(0)
+                hstate, pi = policy_actor.apply(params, hstate, (obs_, dones_))
+                action = pi.sample(seed=rng)[0]
                 env_state = test_step_fn(env_state, action)
                 step_state = (params, env_state, env_state.obs, env_state.done.astype(bool), hstate, rng)
                 return step_state, (env_state.reward, env_state.done, env_state.info)
