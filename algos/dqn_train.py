@@ -110,13 +110,10 @@ class Qnetwork(nn.Module):
 
     @nn.compact
     def __call__(self, obs, action):
-        # Concatenate the observation and action
         x = jnp.concatenate([obs, action], axis=-1)
-        # Pass the concatenated input through the network
         embedding = nn.Dense(self.hidden_dim, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(x)
         embedding = nn.relu(embedding)
         
-        # Compute Q-values
         q_vals = nn.Dense(1, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(embedding)
 
         return jnp.squeeze(q_vals, axis=-1)
@@ -124,7 +121,7 @@ class Qnetwork(nn.Module):
 
     
 class Vnetwork(nn.Module):
-    hidden_dim: int  # Add a hidden dimension for consistency
+    hidden_dim: int
 
     @nn.compact
     def __call__(self, x):
@@ -140,11 +137,9 @@ class Vnetwork(nn.Module):
 
 
 def save_video(frames, filename='trajectory.mp4'):
-    # Append .mp4 to ensure the correct format
     if not filename.endswith('.mp4'):
         filename += '.mp4'
     
-    # Ensure the frames are in the correct format (e.g., numpy arrays, correct color channels)
     with imageio.get_writer(filename, fps=20, format='mp4') as writer:
         for frame in frames:
             writer.append_data(frame)
@@ -380,10 +375,8 @@ def make_train(config):
             
             def v_function_loss(v_params, params, obs, actions, dones, target_agent_params, expectile):
                 """Compute the loss for the V-function using expectile regression."""
-                # V-function output: V(s) = E[Q(s, a)]
                 v_values = v_network.apply(v_params, obs)
                 target_values = q_network.apply(target_agent_params, obs, actions)
-                # Asymmetric expectile regression loss
                 diff = target_values - v_values
                 loss = jnp.where(diff > 0, expectile * diff**2, (1 - expectile) * diff**2)
                 
@@ -391,15 +384,12 @@ def make_train(config):
             
             def q_function_loss(q_params, target_agent_params, obs, actions, rewards, dones, next_obs, discount, v_params):
                 """Compute the loss for the Q-function."""
-                q_values = q_network.apply(q_params, obs, actions)  # Q-function values
+                q_values = q_network.apply(q_params, obs, actions)
                 
-                # Get V-values for the next state (using target V network or current network)
                 next_v_values = v_network.apply(v_params, next_obs)
                 
-                # Bellman target for the Q-function
                 bellman_target = rewards + discount * next_v_values * (1 - dones)
                 
-                # TD error
                 td_error = q_values - bellman_target
                 loss = jnp.mean(td_error**2)
                 
@@ -407,13 +397,11 @@ def make_train(config):
             
             def advantage_weighted_regression_loss(policy_actor, params, obs, actions, dones, h_state, advantages):
                 """AWR loss for policy extraction"""
-                # Get log probabilities of the actions under the current policy
                 h_state, pi = policy_actor.apply(params, h_state, (obs, dones))
                 log_probs = pi.log_prob(actions)
-                
-                # Calculate the weighted log-likelihood loss
-                weights = jnp.exp(advantages)  # Exponentiate the advantages to form the weights
-                loss = -jnp.mean(weights * log_probs)  # Negative log-likelihood weighted by the advantages
+
+                weights = jnp.exp(advantages)
+                loss = -jnp.mean(weights * log_probs)
                 
                 return loss
             
@@ -429,7 +417,6 @@ def make_train(config):
                 dones_ = learn_traj.dones
                 next_obs_ = learn_traj.next_obs
 
-                # Q-function loss
                 q_loss = q_function_loss(
                     q_params,
                     target_agent_params,
@@ -442,7 +429,6 @@ def make_train(config):
                     v_params
                 )
 
-                # V-function loss (expectile regression)
                 q_vals = q_network.apply(q_params, obs_, actions_)
                 v_loss = v_function_loss(
                     v_params,
@@ -454,13 +440,11 @@ def make_train(config):
                     expectile
                 )
 
-                # Compute advantage: A(s, a) = Q(s, a) - V(s)
                 v_values = v_network.apply(v_params, obs_)
                 advantages = compute_advantage(q_vals, v_values)
 
-                # Policy loss (AWR)
                 awr_loss = advantage_weighted_regression_loss(
-                    policy_actor,  # Replace with your policy network (if it's different)
+                    policy_actor,
                     params,
                     obs_,
                     actions_,
@@ -469,7 +453,6 @@ def make_train(config):
                     advantages
                 )
 
-                # Combine all losses
                 total_loss = q_loss + v_loss + awr_loss
 
                 return total_loss
@@ -621,16 +604,16 @@ def make_train(config):
 # debug functions
 def debug_plot_rewards(metrics, filename, num_seeds):
     test_metrics = metrics["test_metrics"]
-    print(f"Test Metrics: {test_metrics}")  # Debug print to see the full structure of test metrics
+    print(f"Test Metrics: {test_metrics}")
 
     test_returns = test_metrics["test_returns"]
-    print(f"Test Returns (before reshape): {test_returns.shape}")  # Debug to check test returns before reshaping
+    print(f"Test Returns (before reshape): {test_returns.shape}")
 
     reward_mean = test_returns.mean(axis=0)
     reward_std = test_returns.std(axis=0) / np.sqrt(num_seeds)
 
-    print(f"Reward Mean: {reward_mean.shape}")  # Debug to check reward mean
-    print(f"Reward Std: {reward_std.shape}")    # Debug to check reward standard deviation
+    print(f"Reward Mean: {reward_mean.shape}")
+    print(f"Reward Std: {reward_std.shape}")   
 
     plt.plot(reward_mean)
     plt.fill_between(range(len(reward_mean)), reward_mean - reward_std, reward_mean + reward_std, alpha=0.2)
@@ -703,11 +686,8 @@ def main(config):
         
         debug_plot_rewards(outs["metrics"], f'{env_name}_dqn', config["NUM_SEEDS"])
     else:
-        # Load model parameters
         def load_params(filename: Union[str, os.PathLike]) -> dict:
-            # Load the flattened dictionary from file
-            flattened_dict = load_file(filename)  # Assuming you have a load_file function
-            # Reconstruct the tree structure
+            flattened_dict = load_file(filename)
             params = unflatten_dict(flattened_dict, sep=',')
             return params
         save_dir = os.path.join(config['SAVE_PATH'], env_name)    
