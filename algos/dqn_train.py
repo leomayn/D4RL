@@ -354,13 +354,7 @@ def make_train(config):
                 dones_ = learn_traj.dones
                 hstate, mean, std = homogeneous_pass(params, init_hs, obs_, dones_)
                 _, target_mean, target_std = homogeneous_pass(target_agent_params, init_hs, obs_, dones_)
-
-                # Compute value estimates (e.g., using critic network)
-                # Since DQN is not directly applicable to continuous actions,
-                # you may need to adjust this to use a suitable algorithm like DDPG, TD3, or SAC
-
-                # Placeholder loss (since DQN isn't suitable for continuous actions)
-                loss = jnp.array(0.0)
+                loss = jnp.mean(jnp.square(mean - target_mean))
 
                 return loss
 
