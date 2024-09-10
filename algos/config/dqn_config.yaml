@@ -30,11 +30,14 @@
 "WEIGHT_DECAY_ADAM": 0.00001
 "TD_LAMBDA_LOSS": False
 "TD_LAMBDA": 0.6
+"BETA": 1
 "GAMMA": 0.99
 "VERBOSE": False
 "WANDB_ONLINE_REPORT": True
 "NUM_TEST_EPISODES": 32
 "TEST_INTERVAL": 50000
+"POLICY_HIDDEN": 128
+"EXPECTILE": 0.1
 
 "WANDB_MODE": "online"  # enable this line in training
 "ENTITY": "marlhf"
@@ -46,6 +49,6 @@
 
 "TRAIN": False
 "GYM_NAME": "HalfCheetah"
-"DEBUG_STEPS": 10e4
+"DEBUG_STEPS": 10e3
 "RENDER": False
 "ALG_NAME": "dqn"

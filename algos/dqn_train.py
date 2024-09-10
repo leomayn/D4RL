@@ -112,7 +112,6 @@ class Qnetwork(nn.Module):
     def __call__(self, obs, action):
         # Concatenate the observation and action
         x = jnp.concatenate([obs, action], axis=-1)
-        
         # Pass the concatenated input through the network
         embedding = nn.Dense(self.hidden_dim, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(x)
         embedding = nn.relu(embedding)
@@ -166,10 +165,6 @@ def get_rollout(params, config):
     obs = state.obs
     done = state.done
     hstate = ScannedRNN.initialize_carry(config["AGENT_HIDDEN_DIM"], 1)
-    
-    def homogeneous_pass(params, hidden_state, obs, dones):
-            hidden_state, mean, std = policy_actor.apply(params, hidden_state, (obs, dones))
-            return hidden_state, mean, std
         
     network_params = params
     rollout = [state.pipeline_state]
@@ -181,9 +176,8 @@ def get_rollout(params, config):
         key, key_a = jax.random.split(key)
         obs = obs[np.newaxis, np.newaxis, :]
         done = jnp.array(done)[np.newaxis, np.newaxis]
-        hstate, mean, std = homogeneous_pass(params, hstate, obs, done)
-        action = mean.squeeze(0)
-        action = action.squeeze()
+        hstate, pi = policy_actor.apply(params, hstate, (obs, done))
+        action = pi.sample(seed=key_a)[0]
         state = step_fn(state, action)
         done = state.done
         obs = state.obs
@@ -195,6 +189,7 @@ def get_rollout(params, config):
 
 class Transition(NamedTuple):
     obs: jnp.ndarray
+    next_obs: jnp.ndarray
     actions: jnp.ndarray
     rewards: jnp.ndarray
     dones: jnp.ndarray
@@ -234,13 +229,14 @@ def make_train(config):
     # Beginning of IL
     il_model = ActorRNN(action_dim=env.action_size, config=config)
     rng = jax.random.PRNGKey(0)
+    rng, _s_init_rng = jax.random.split(rng)
     _s_init_x = (
         jnp.zeros((1, 1, env.observation_size)),
         jnp.zeros((1, 1))
     )
-    _s_init_h = ScannedRNN.initialize_carry(config["NUM_ENVS"], config["IL_NETWORK_HIDDEN"])
+    _s_init_h = ScannedRNN.initialize_carry(config["IL_NETWORK_HIDDEN"], config["NUM_ENVS"])
 
-    init_params = il_model.init(rng, _s_init_h, _s_init_x)
+    init_params = il_model.init(_s_init_rng, _s_init_h, _s_init_x)
     params_path = os.path.join(config["IL_NETWORK_SAVE_PATH"], 'final.msgpack')
 
     if os.path.exists(params_path):
@@ -253,6 +249,14 @@ def make_train(config):
         return
 
     # End of IL
+    
+    # initalize networks
+    
+    # INIT NETWORK
+    policy_actor = ActorRNN(action_dim=env.action_size, config=config)
+    # q network, v network
+    q_network = Qnetwork(action_dim=env.action_size, hidden_dim=config["AGENT_HIDDEN_DIM"], init_scale=config['AGENT_INIT_SCALE'])
+    v_network = Vnetwork(hidden_dim=config["AGENT_HIDDEN_DIM"])
 
     def train(rng):
         # INIT ENV
@@ -272,6 +276,7 @@ def make_train(config):
         # INIT BUFFER
         def _env_sample_step(env_state, unused):
             rng, key_a, key_s = jax.random.split(jax.random.PRNGKey(0), 3)
+            last_obs = env_state.obs
             
             # Sample a random action from the environment's action space
             action = jax.random.uniform(key_a, shape=(config["NUM_ENVS"], env.action_size), minval=-1, maxval=1)
@@ -283,7 +288,7 @@ def make_train(config):
             dones = env_state.done
             infos = env_state.info
             
-            transition = Transition(obs, action, rewards, dones, infos)
+            transition = Transition(last_obs, obs, action, rewards, dones, infos)
             return env_state, transition
         
         _, sample_traj = jax.lax.scan(_env_sample_step, env_state, None, config["NUM_STEPS"])
@@ -298,15 +303,17 @@ def make_train(config):
         )
         buffer_state = buffer.init(sample_traj_unbatched)
 
-        # INIT NETWORK
-        policy_actor = ActorRNN(action_dim=env.action_size, config=config)
-        # q network, v network
-        q_network = Qnetwork(action_dim=env.action_size, hidden_dim=config["AGENT_HIDDEN_DIM"], init_scale=config['AGENT_INIT_SCALE'])
-        v_network = Vnetwork(action_dim=env.action_size, activation=config["ACTIVATION"])
         rng, _rng = jax.random.split(rng)
         init_x = (jnp.zeros((1, 1, env.observation_size)), jnp.zeros((1, 1)))
-        init_hs = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], 1)
+        init_hs = ScannedRNN.initialize_carry(config["POLICY_HIDDEN"], 1)
         network_params = policy_actor.init(_rng, init_hs, init_x)
+        
+        rng, q_rng = jax.random.split(rng)
+        rng, v_rng = jax.random.split(rng)
+        dummy_obs = jnp.zeros((1, 1, env.observation_size))
+        dummy_action = jnp.zeros((1, 1, env.action_size))
+        q_params = q_network.init(q_rng, dummy_obs, dummy_action)
+        v_params = v_network.init(v_rng, dummy_obs)
 
         # INIT TRAIN STATE AND OPTIMIZER
         tx = optax.chain(
@@ -318,7 +325,7 @@ def make_train(config):
             params=network_params,
             tx=tx,
         )
-        target_agent_params = jax.tree_util.tree_map(lambda x: jnp.copy(x), train_state.params)
+        target_agent_params = jax.tree_util.tree_map(lambda x: jnp.copy(x), q_params)
 
         # TRAINING LOOP
         def _update_step(runner_state, unused):
@@ -333,7 +340,7 @@ def make_train(config):
 
                 # SELECT ACTION
                 hstate, pi = policy_actor.apply(params, hstate, (obs_, dones_))
-                action = pi.sample(seed=rng)[0]
+                action = pi.sample(seed=key_a)[0]
                 reward, il_h_state = generate_reward(il_model, il_params, obs_, action, dones_, il_h_state)
 
                 # STEP ENV
@@ -341,18 +348,17 @@ def make_train(config):
                 obs = env_state.obs
                 done = env_state.done
                 info = env_state.info
-                transition = Transition(last_obs, action, reward, done, info)  # Empty info dict
+                transition = Transition(last_obs, obs, action, reward, done, info)  # Empty info dict
 
                 step_state = (params, env_state, obs, done.astype(bool), hstate, il_h_state, rng, t+1)
                 return step_state, transition
 
             rng, _rng = jax.random.split(rng)
-            hstate = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], config["NUM_ENVS"])
+            hstate = ScannedRNN.initialize_carry(config["POLICY_HIDDEN"], config["NUM_ENVS"])
             il_h_state = ScannedRNN.initialize_carry(config['IL_NETWORK_HIDDEN'], config["NUM_ENVS"])
 
             step_state = (
                 train_state.params,
-                q_params,
                 env_state,
                 init_obs,
                 init_dones,
@@ -372,23 +378,23 @@ def make_train(config):
 
             # LEARNING PHASE
             
-            def v_function_loss(v_params, q_values, obs, dones, target_values, expectile):
+            def v_function_loss(v_params, params, obs, actions, dones, target_agent_params, expectile):
                 """Compute the loss for the V-function using expectile regression."""
                 # V-function output: V(s) = E[Q(s, a)]
-                v_values = v_network(v_params, obs)
-                
+                v_values = v_network.apply(v_params, obs)
+                target_values = q_network.apply(target_agent_params, obs, actions)
                 # Asymmetric expectile regression loss
                 diff = target_values - v_values
                 loss = jnp.where(diff > 0, expectile * diff**2, (1 - expectile) * diff**2)
                 
                 return jnp.mean(loss)
             
-            def q_function_loss(q_params, target_q, obs, actions, rewards, dones, next_obs, discount, v_params):
+            def q_function_loss(q_params, target_agent_params, obs, actions, rewards, dones, next_obs, discount, v_params):
                 """Compute the loss for the Q-function."""
-                q_values = q_network(v_params, obs, actions)  # Q-function values
+                q_values = q_network.apply(q_params, obs, actions)  # Q-function values
                 
                 # Get V-values for the next state (using target V network or current network)
-                next_v_values = v_network(v_params, next_obs)
+                next_v_values = v_network.apply(v_params, next_obs)
                 
                 # Bellman target for the Q-function
                 bellman_target = rewards + discount * next_v_values * (1 - dones)
@@ -399,10 +405,11 @@ def make_train(config):
                 
                 return loss
             
-            def advantage_weighted_regression_loss(policy, params, obs, actions, advantages):
+            def advantage_weighted_regression_loss(policy_actor, params, obs, actions, dones, h_state, advantages):
                 """AWR loss for policy extraction"""
                 # Get log probabilities of the actions under the current policy
-                log_probs = policy.apply(params, obs).log_prob(actions)
+                h_state, pi = policy_actor.apply(params, h_state, (obs, dones))
+                log_probs = pi.log_prob(actions)
                 
                 # Calculate the weighted log-likelihood loss
                 weights = jnp.exp(advantages)  # Exponentiate the advantages to form the weights
@@ -436,11 +443,12 @@ def make_train(config):
                 )
 
                 # V-function loss (expectile regression)
-                q_vals = q_network.apply(params, obs_, actions_)
+                q_vals = q_network.apply(q_params, obs_, actions_)
                 v_loss = v_function_loss(
                     v_params,
                     q_vals,
                     obs_,
+                    actions_,
                     dones_,
                     target_agent_params,
                     expectile
@@ -456,6 +464,8 @@ def make_train(config):
                     params,
                     obs_,
                     actions_,
+                    dones_,
+                    init_hs,
                     advantages
                 )
 
@@ -472,10 +482,10 @@ def make_train(config):
                 lambda x: jnp.swapaxes(x[:, 0], 0, 1), 
                 learn_traj
             )
-            init_hs = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], config["BUFFER_BATCH_SIZE"])
+            init_hs = ScannedRNN.initialize_carry(config["POLICY_HIDDEN"], config["BUFFER_BATCH_SIZE"])
 
             grad_fn = jax.value_and_grad(_loss_fn, has_aux=False)
-            loss, grads = grad_fn(train_state.params, target_agent_params, init_hs, learn_traj, config['EXPECTILE'], config['GAMMA'], v_params)
+            loss, grads = grad_fn(train_state.params, target_agent_params, init_hs, learn_traj, config['EXPECTILE'], config['GAMMA'], v_params, q_params)
             train_state = train_state.apply_gradients(grads=grads)
 
             rng, _rng = jax.random.split(rng)
@@ -488,7 +498,7 @@ def make_train(config):
 
             target_agent_params = jax.lax.cond(
                 time_state['updates'] % config['TARGET_UPDATE_INTERVAL'] == 0,
-                lambda _: jax.tree_util.tree_map(lambda x: jnp.copy(x), train_state.params),
+                lambda _: jax.tree_util.tree_map(lambda x: jnp.copy(x), q_params),
                 lambda _: target_agent_params,
                 operand=None
             )
@@ -525,6 +535,8 @@ def make_train(config):
 
             runner_state = (
                 train_state,
+                q_params,
+                v_params,
                 target_agent_params,
                 env_state,
                 buffer_state,
@@ -541,11 +553,11 @@ def make_train(config):
             """Help function to test greedy policy during training"""
             def _greedy_env_step(step_state, unused):
                 params, env_state, last_obs, last_dones, hstate, rng = step_state
-                rng, key_s = jax.random.split(rng)
+                rng, key_a = jax.random.split(rng)
                 obs_ = last_obs[np.newaxis, :]
                 dones_ = last_dones[np.newaxis, :]
                 hstate, pi = policy_actor.apply(params, hstate, (obs_, dones_))
-                action = pi.sample(seed=rng)[0]
+                action = pi.sample(seed=key_a)[0]
                 env_state = test_step_fn(env_state, action)
                 step_state = (params, env_state, env_state.obs, env_state.done.astype(bool), hstate, rng)
                 return step_state, (env_state.reward, env_state.done, env_state.info)
@@ -554,7 +566,7 @@ def make_train(config):
             env_state = test_reset_fn(reset_rngs)
             init_dones = jnp.zeros((config["NUM_TEST_EPISODES"]), dtype=bool)
             rng, _rng = jax.random.split(rng)
-            hstate = ScannedRNN.initialize_carry(config['AGENT_HIDDEN_DIM'], config["NUM_TEST_EPISODES"])
+            hstate = ScannedRNN.initialize_carry(config["POLICY_HIDDEN"], config["NUM_TEST_EPISODES"])
             step_state = (
                 params,
                 env_state,
@@ -586,6 +598,8 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         runner_state = (
             train_state,
+            q_params,
+            v_params,
             target_agent_params,
             env_state,
             buffer_state,
