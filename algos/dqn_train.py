@@ -7,7 +7,7 @@ from typing import NamedTuple, Union
 import time
 import gym
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 os.environ['PYOPENGL_PLATFORM'] = 'egl'
 os.environ['MUJOCO_GL'] = 'egl'
 os.environ['D4RL_SUPPRESS_IMPORT_ERROR'] = '1'
@@ -320,11 +320,24 @@ def make_train(config):
             params=network_params,
             tx=tx,
         )
+        
+        q_state = TrainState.create(
+            apply_fn=q_network.apply,
+            params=q_params,
+            tx=tx,
+        )
+        
+        v_state = TrainState.create(
+            apply_fn=v_network.apply,
+            params=v_params,
+            tx=tx,
+        )
+        
         target_agent_params = jax.tree_util.tree_map(lambda x: jnp.copy(x), q_params)
 
         # TRAINING LOOP
         def _update_step(runner_state, unused):
-            train_state, q_params, v_params, target_agent_params, env_state, buffer_state, time_state, init_obs, init_dones, test_metrics, rng = runner_state
+            train_state, q_state, v_state, target_agent_params, env_state, buffer_state, time_state, init_obs, init_dones, test_metrics, rng = runner_state
 
             def _env_step(step_state, unused):
                 params, env_state, last_obs, last_dones, hstate, il_h_state, rng, t = step_state
@@ -373,7 +386,7 @@ def make_train(config):
 
             # LEARNING PHASE
             
-            def v_function_loss(v_params, params, obs, actions, dones, target_agent_params, expectile):
+            def v_function_loss(v_params, obs, actions, target_agent_params, expectile):
                 """Compute the loss for the V-function using expectile regression."""
                 v_values = v_network.apply(v_params, obs)
                 target_values = q_network.apply(target_agent_params, obs, actions)
@@ -382,7 +395,7 @@ def make_train(config):
                 
                 return jnp.mean(loss)
             
-            def q_function_loss(q_params, target_agent_params, obs, actions, rewards, dones, next_obs, discount, v_params):
+            def q_function_loss(q_params, obs, actions, rewards, dones, next_obs, discount, v_params):
                 """Compute the loss for the Q-function."""
                 q_values = q_network.apply(q_params, obs, actions)
                 
@@ -395,12 +408,12 @@ def make_train(config):
                 
                 return loss
             
-            def advantage_weighted_regression_loss(policy_actor, params, obs, actions, dones, h_state, advantages):
+            def advantage_weighted_regression_loss(params, obs, actions, dones, h_state, advantages, temperature):
                 """AWR loss for policy extraction"""
                 h_state, pi = policy_actor.apply(params, h_state, (obs, dones))
                 log_probs = pi.log_prob(actions)
 
-                weights = jnp.exp(advantages)
+                weights = jnp.exp(temperature * advantages)
                 loss = -jnp.mean(weights * log_probs)
                 
                 return loss
@@ -410,52 +423,52 @@ def make_train(config):
                 return q_values - v_values
 
 
-            def _loss_fn(params, target_agent_params, init_hs, learn_traj, expectile, discount, v_params, q_params):
+            def _loss_fn(train_state, target_agent_params, init_hs, learn_traj, expectile, discount, temperature, v_state, q_state):
                 obs_ = learn_traj.obs
                 actions_ = learn_traj.actions
                 rewards_ = learn_traj.rewards
                 dones_ = learn_traj.dones
                 next_obs_ = learn_traj.next_obs
 
-                q_loss = q_function_loss(
-                    q_params,
-                    target_agent_params,
-                    obs_,
-                    actions_,
-                    rewards_,
-                    dones_,
-                    next_obs_,
-                    discount,
-                    v_params
-                )
-
-                q_vals = q_network.apply(q_params, obs_, actions_)
-                v_loss = v_function_loss(
-                    v_params,
-                    q_vals,
-                    obs_,
-                    actions_,
-                    dones_,
-                    target_agent_params,
-                    expectile
-                )
-
-                v_values = v_network.apply(v_params, obs_)
+                q_grad_fn = jax.value_and_grad(q_function_loss, has_aux=False)
+                v_grad_fn = jax.value_and_grad(v_function_loss, has_aux=False)
+                grad_fn = jax.value_and_grad(advantage_weighted_regression_loss, has_aux=False)
+                
+                v_loss, v_grads = v_grad_fn(
+                        v_state.params,
+                        obs_,
+                        actions_,
+                        target_agent_params,
+                        expectile
+                    )
+                v_state.apply_gradients(grads=v_grads)
+                v_values = v_network.apply(v_state.params, obs_)
+                
+                q_loss, q_grads = q_grad_fn(
+                        q_state.params,
+                        obs_,
+                        actions_,
+                        rewards_,
+                        dones_,
+                        next_obs_,
+                        discount,
+                        v_state.params)
+                q_state.apply_gradients(grads=q_grads)
+                q_vals = q_network.apply(q_state.params, obs_, actions_)
+                
                 advantages = compute_advantage(q_vals, v_values)
+                loss, grads = grad_fn(
+                        train_state.params,
+                        obs_,
+                        actions_,
+                        dones_,
+                        init_hs,
+                        advantages,
+                        temperature
+                    )
+                train_state = train_state.apply_gradients(grads=grads)
 
-                awr_loss = advantage_weighted_regression_loss(
-                    policy_actor,
-                    params,
-                    obs_,
-                    actions_,
-                    dones_,
-                    init_hs,
-                    advantages
-                )
-
-                total_loss = q_loss + v_loss + awr_loss
-
-                return total_loss
+                return (q_loss, v_loss, loss)
 
 
 
@@ -466,10 +479,8 @@ def make_train(config):
                 learn_traj
             )
             init_hs = ScannedRNN.initialize_carry(config["POLICY_HIDDEN"], config["BUFFER_BATCH_SIZE"])
-
-            grad_fn = jax.value_and_grad(_loss_fn, has_aux=False)
-            loss, grads = grad_fn(train_state.params, target_agent_params, init_hs, learn_traj, config['EXPECTILE'], config['GAMMA'], v_params, q_params)
-            train_state = train_state.apply_gradients(grads=grads)
+            _, _, loss = _loss_fn(train_state, target_agent_params, init_hs, learn_traj, config['EXPECTILE'], config['GAMMA'], config["BETA"], v_state, q_state)
+            
 
             rng, _rng = jax.random.split(rng)
             reset_rngs = jax.random.split(_rng, config["NUM_ENVS"])
@@ -518,8 +529,8 @@ def make_train(config):
 
             runner_state = (
                 train_state,
-                q_params,
-                v_params,
+                q_state,
+                v_state,
                 target_agent_params,
                 env_state,
                 buffer_state,
@@ -581,8 +592,8 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         runner_state = (
             train_state,
-            q_params,
-            v_params,
+            q_state,
+            v_state,
             target_agent_params,
             env_state,
             buffer_state,
@@ -674,6 +685,7 @@ def main(config):
         plot_rewards(outs["metrics"], f'{env_name}_dqn', config["NUM_SEEDS"], config["ENV_NAME"], config["ALG_NAME"])
     elif config["DEBUG"]:
         config["TOTAL_TIMESTEPS"] = config["DEBUG_STEPS"]
+        config["BUFFER_SIZE"] = config["DEBUG_BUFFER_SIZE"]
         rng = jax.random.PRNGKey(config["SEED"])
         rngs = jax.random.split(rng, config["NUM_SEEDS"])
         train_vjit = jax.jit(jax.vmap(make_train(config)))

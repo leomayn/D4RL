@@ -1,4 +1,4 @@
-"DEBUG": True
+"DEBUG": False
 "DISABLE_JIT": False
 "NUM_SEEDS": 5
 "SEED": 30
@@ -14,7 +14,8 @@
 # other params
 "NUM_ENVS": 8
 "NUM_STEPS": 256
-"BUFFER_SIZE": 1024
+"BUFFER_SIZE": 512
+"DEBUG_BUFFER_SIZE": 512
 "BUFFER_BATCH_SIZE": 32
 "TOTAL_TIMESTEPS": 5e6
 "AGENT_HIDDEN_DIM": 64
@@ -37,7 +38,7 @@
 "NUM_TEST_EPISODES": 32
 "TEST_INTERVAL": 50000
 "POLICY_HIDDEN": 128
-"EXPECTILE": 0.1
+"EXPECTILE": 0.5
 
 "WANDB_MODE": "online"  # enable this line in training
 "ENTITY": "marlhf"
@@ -47,7 +48,7 @@
 "IL_NETWORK_HIDDEN": 128
 "IL_NETWORK_SAVE_PATH": "results/IL_configs/student_network"
 
-"TRAIN": False
+"TRAIN": True
 "GYM_NAME": "HalfCheetah"
 "DEBUG_STEPS": 10e3
 "RENDER": False
