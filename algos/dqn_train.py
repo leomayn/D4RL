@@ -33,6 +33,8 @@ from typing import Sequence, Dict
 
 import imageio
 
+from utils.networks import ActorRNN
+
 import distrax
 
 class ScannedRNN(nn.Module):
@@ -60,48 +62,6 @@ class ScannedRNN(nn.Module):
     def initialize_carry(hidden_size, *batch_size):
         return nn.GRUCell(hidden_size).initialize_carry(jax.random.PRNGKey(0), (*batch_size, hidden_size))
 
-
-class ActorRNN(nn.Module):
-    action_dim: Sequence[int]
-    config: Dict
-
-    @nn.compact
-    def __call__(self, hidden, x):
-        
-        if len(x) == 3:
-            obs, dones, avail_actions = x
-        else:
-            obs, dones = x
-            avail_actions = jnp.ones((obs.shape[0], obs.shape[1], self.action_dim))
-        embedding = nn.Dense(
-            128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs)
-        embedding = nn.relu(embedding)
-
-        rnn_in = (embedding, dones)
-        
-
-        
-        hidden, embedding = ScannedRNN()(hidden, rnn_in)
-
-        actor_mean = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(
-            embedding
-        )
-        actor_mean = nn.relu(actor_mean)
-        actor_mean = nn.Dense(
-            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
-        )(actor_mean)
-        
-        # unavail_actions = 1 - avail_actions
-        # action_logits = actor_mean - (unavail_actions * 1e10)
-        
-        actor_log_std = self.param('actor_log_std', lambda key, shape: -0.5 * jnp.ones(shape), (self.action_dim,))
-        action_std = jnp.exp(actor_log_std)
-
-        # pi = distrax.Categorical(logits=action_logits)
-        pi = distrax.MultivariateNormalDiag(loc=actor_mean, scale_diag=action_std)
-
-        return hidden, pi
 
 class Qnetwork(nn.Module):
     action_dim: int
@@ -159,11 +119,9 @@ def get_rollout(params, config):
     state = reset_fn(key_r)
     obs = state.obs
     done = state.done
-    hstate = ScannedRNN.initialize_carry(config["AGENT_HIDDEN_DIM"], 1)
+    hstate = ScannedRNN.initialize_carry(config["POLICY_HIDDEN"], 1)
         
-    network_params = params
     rollout = [state.pipeline_state]
-    timestep = 0
     # grab a trajectory
     frames = []
     # while not done:
@@ -172,7 +130,7 @@ def get_rollout(params, config):
         obs = obs[np.newaxis, np.newaxis, :]
         done = jnp.array(done)[np.newaxis, np.newaxis]
         hstate, pi = policy_actor.apply(params, hstate, (obs, done))
-        action = pi.sample(seed=key_a)[0]
+        action = pi.sample(seed=key_a)[0].squeeze(0)
         state = step_fn(state, action)
         done = state.done
         obs = state.obs
@@ -198,6 +156,7 @@ def generate_reward(il_model, il_params, obs, action, done, il_h_state):
     return (reward, il_h_state)
 
 def plot_rewards(metrics, filename, num_seeds, alg_name, env_name):
+    plt.clf()
     test_metrics = metrics["test_metrics"]
     test_returns = test_metrics["test_returns"]
     
@@ -208,8 +167,23 @@ def plot_rewards(metrics, filename, num_seeds, alg_name, env_name):
     plt.fill_between(range(len(reward_mean)), reward_mean - reward_std, reward_mean + reward_std, alpha=0.2)
     plt.xlabel("Update Step")
     plt.ylabel("Return")
-    plt.title(f"{env_name}_{alg_name}")
-    plt.savefig(f'{filename}.png')
+    plt.title(f"{env_name}_{alg_name}_true")
+    plt.savefig(f'{filename}_true.png')
+    
+def plot_virtual_rewards(metrics, filename, num_seeds, alg_name, env_name):
+    plt.clf()
+    test_metrics = metrics["test_metrics"]
+    test_returns = test_metrics["test_virtual_returns"]
+    
+    reward_mean = test_returns.mean(axis=0)
+    reward_std = test_returns.std(axis=0) / np.sqrt(num_seeds)
+    
+    plt.plot(reward_mean)
+    plt.fill_between(range(len(reward_mean)), reward_mean - reward_std, reward_mean + reward_std, alpha=0.2)
+    plt.xlabel("Update Step")
+    plt.ylabel("Return")
+    plt.title(f"{env_name}_{alg_name}_virtual")
+    plt.savefig(f'{filename}_virtual.png')
 
 def make_train(config):
     config["NUM_UPDATES"] = (
@@ -229,7 +203,7 @@ def make_train(config):
         jnp.zeros((1, 1, env.observation_size)),
         jnp.zeros((1, 1))
     )
-    _s_init_h = ScannedRNN.initialize_carry(config["IL_NETWORK_HIDDEN"], config["NUM_ENVS"])
+    _s_init_h = ScannedRNN.initialize_carry(config["IL_NETWORK_HIDDEN"], 1)
 
     init_params = il_model.init(_s_init_rng, _s_init_h, _s_init_x)
     params_path = os.path.join(config["IL_NETWORK_SAVE_PATH"], 'final.msgpack')
@@ -356,6 +330,7 @@ def make_train(config):
                 obs = env_state.obs
                 done = env_state.done
                 info = env_state.info
+                # reward = env_state.reward
                 transition = Transition(last_obs, obs, action, reward, done, info)  # Empty info dict
 
                 step_state = (params, env_state, obs, done.astype(bool), hstate, il_h_state, rng, t+1)
@@ -470,8 +445,6 @@ def make_train(config):
 
                 return (q_loss, v_loss, loss)
 
-
-
             rng, _rng = jax.random.split(rng)
             learn_traj = buffer.sample(buffer_state, _rng).experience
             learn_traj = jax.tree_util.tree_map(
@@ -479,7 +452,7 @@ def make_train(config):
                 learn_traj
             )
             init_hs = ScannedRNN.initialize_carry(config["POLICY_HIDDEN"], config["BUFFER_BATCH_SIZE"])
-            _, _, loss = _loss_fn(train_state, target_agent_params, init_hs, learn_traj, config['EXPECTILE'], config['GAMMA'], config["BETA"], v_state, q_state)
+            q_loss, v_loss, loss = _loss_fn(train_state, target_agent_params, init_hs, learn_traj, config['EXPECTILE'], config['GAMMA'], config["BETA"], v_state, q_state)
             
 
             rng, _rng = jax.random.split(rng)
@@ -511,6 +484,8 @@ def make_train(config):
                 'timesteps': time_state['timesteps']*config['NUM_ENVS'],
                 'updates' : time_state['updates'],
                 'loss': loss,
+                'q_loss': q_loss,
+                'v_loss': v_loss,
                 'rewards': traj_batch.rewards.sum(),
             }
             metrics['test_metrics'] = test_metrics # add the test metrics dictionary
@@ -519,10 +494,13 @@ def make_train(config):
                 def callback(metrics, infos):
                     wandb.log(
                         {
-                            "returns": metrics['rewards'],
+                            "virtual_returns": metrics['rewards'],
                             "timestep": metrics['timesteps'],
                             "updates": metrics['updates'],
                             "loss": metrics['loss'],
+                            "q_loss": metrics['q_loss'],
+                            "v_loss": metrics['v_loss'],
+                            **{k:v.mean() for k, v in metrics['test_metrics'].items()}
                         }
                     )
                 jax.debug.callback(callback, metrics, traj_batch.infos)
@@ -546,35 +524,41 @@ def make_train(config):
         def get_greedy_metrics(rng, params, time_state):
             """Help function to test greedy policy during training"""
             def _greedy_env_step(step_state, unused):
-                params, env_state, last_obs, last_dones, hstate, rng = step_state
+                params, env_state, last_obs, last_dones, hstate, il_h_state, rng = step_state
                 rng, key_a = jax.random.split(rng)
                 obs_ = last_obs[np.newaxis, :]
                 dones_ = last_dones[np.newaxis, :]
                 hstate, pi = policy_actor.apply(params, hstate, (obs_, dones_))
                 action = pi.sample(seed=key_a)[0]
+                virtual_reward, il_h_state = generate_reward(il_model, il_params, obs_, action, dones_, il_h_state)
+                # virtual_reward = 0
                 env_state = test_step_fn(env_state, action)
-                step_state = (params, env_state, env_state.obs, env_state.done.astype(bool), hstate, rng)
-                return step_state, (env_state.reward, env_state.done, env_state.info)
+                step_state = (params, env_state, env_state.obs, env_state.done.astype(bool), hstate, il_h_state, rng)
+                return step_state, (env_state.reward, virtual_reward, env_state.done, env_state.info)
             rng, _rng = jax.random.split(rng)
             reset_rngs = jax.random.split(_rng, config["NUM_TEST_EPISODES"])
             env_state = test_reset_fn(reset_rngs)
             init_dones = jnp.zeros((config["NUM_TEST_EPISODES"]), dtype=bool)
             rng, _rng = jax.random.split(rng)
             hstate = ScannedRNN.initialize_carry(config["POLICY_HIDDEN"], config["NUM_TEST_EPISODES"])
+            il_h_state = ScannedRNN.initialize_carry(config["IL_NETWORK_HIDDEN"], config["NUM_TEST_EPISODES"])
             step_state = (
                 params,
                 env_state,
                 env_state.obs,
                 init_dones,
-                hstate, 
+                hstate,
+                il_h_state, 
                 _rng,
             )
-            step_state, (rewards, dones, infos) = jax.lax.scan(
+            step_state, (rewards, virtual_rewards, dones, infos) = jax.lax.scan(
                 _greedy_env_step, step_state, None, config["NUM_STEPS"]
             )
             first_returns = rewards.sum()
+            virtual_returns = virtual_rewards.sum()
             metrics = {
                 'test_returns': first_returns,# episode returns
+                'test_virtual_returns': virtual_returns
             }
             if config.get('VERBOSE', False):
                 def callback(timestep, val):
@@ -612,26 +596,6 @@ def make_train(config):
 
 
 
-# debug functions
-def debug_plot_rewards(metrics, filename, num_seeds):
-    test_metrics = metrics["test_metrics"]
-    print(f"Test Metrics: {test_metrics}")
-
-    test_returns = test_metrics["test_returns"]
-    print(f"Test Returns (before reshape): {test_returns.shape}")
-
-    reward_mean = test_returns.mean(axis=0)
-    reward_std = test_returns.std(axis=0) / np.sqrt(num_seeds)
-
-    print(f"Reward Mean: {reward_mean.shape}")
-    print(f"Reward Std: {reward_std.shape}")   
-
-    plt.plot(reward_mean)
-    plt.fill_between(range(len(reward_mean)), reward_mean - reward_std, reward_mean + reward_std, alpha=0.2)
-    plt.xlabel("Update Step")
-    plt.ylabel("Return")
-    plt.savefig(f'{filename}.png')
-
 @hydra.main(version_base=None, config_path="./config", config_name="dqn_config")
 def main(config):
     config = OmegaConf.to_container(config)
@@ -653,8 +617,8 @@ def main(config):
         ],
         name=f'dqn_{env_name}',
         config=config,
-        # mode=config["WANDB_MODE"],
-        mode='disabled',
+        mode=config["WANDB_MODE"],
+        # mode='disabled',
     )
     
     
@@ -683,6 +647,7 @@ def main(config):
             print(f'Parameters of first batch saved in {save_dir}/dqn.safetensors')
             
         plot_rewards(outs["metrics"], f'{env_name}_dqn', config["NUM_SEEDS"], config["ENV_NAME"], config["ALG_NAME"])
+        plot_virtual_rewards(outs["metrics"], f'{env_name}_dqn', config["NUM_SEEDS"], config["ENV_NAME"], config["ALG_NAME"])
     elif config["DEBUG"]:
         config["TOTAL_TIMESTEPS"] = config["DEBUG_STEPS"]
         config["BUFFER_SIZE"] = config["DEBUG_BUFFER_SIZE"]
@@ -696,7 +661,7 @@ def main(config):
         total_time = end_time - start_time
         print(f"Time for training: {total_time:.2f}")
         
-        debug_plot_rewards(outs["metrics"], f'{env_name}_dqn', config["NUM_SEEDS"])
+        plot_rewards(outs["metrics"], f'{env_name}_dqn', config["NUM_SEEDS"])
     else:
         def load_params(filename: Union[str, os.PathLike]) -> dict:
             flattened_dict = load_file(filename)

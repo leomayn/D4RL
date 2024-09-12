@@ -51,5 +51,5 @@
 "TRAIN": True
 "GYM_NAME": "HalfCheetah"
 "DEBUG_STEPS": 10e3
-"RENDER": False
+"RENDER": True
 "ALG_NAME": "dqn"

@@ -35,6 +35,7 @@ class ScannedRNN(nn.Module):
         cell = nn.GRUCell(features=hidden_size)
         return cell.initialize_carry(jax.random.PRNGKey(0), (batch_size, hidden_size))
 
+'''
 class ActorRNN(nn.Module):
     action_dim: Sequence[int]
     config: Dict
@@ -77,7 +78,58 @@ class ActorRNN(nn.Module):
 
         return hidden, pi
 
+'''
 
+class ActorRNN(nn.Module):
+    action_dim: Sequence[int]
+    config: Dict
+
+    @nn.compact
+    def __call__(self, hidden, x):
+        
+        if len(x) == 3:
+            obs, dones, avail_actions = x
+        else:
+            obs, dones = x
+            avail_actions = jnp.ones((obs.shape[0], obs.shape[1], self.action_dim))
+        timestep, batch_size, _ = obs.shape
+        embedding = nn.Dense(
+            128, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(obs)
+        embedding = nn.relu(embedding)
+
+        rnn_in = (embedding, dones)
+        
+        hidden, embedding = ScannedRNN()(hidden, rnn_in)
+        
+        # unavail_actions = 1 - avail_actions
+        # action_logits = actor_mean - (unavail_actions * 1e10)
+        
+        component_means = nn.Dense(
+            3 * self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+        )(embedding)
+        component_means = component_means.reshape(timestep, batch_size, 3, self.action_dim)
+        
+        component_log_stds = nn.Dense(
+            3 * self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+        )(embedding)
+        component_log_stds = component_log_stds.reshape(timestep, batch_size, 3, self.action_dim)
+
+        component_stds = jnp.exp(component_log_stds)
+
+        mixture_logits = nn.Dense(3, kernel_init=orthogonal(0.01), bias_init=constant(0.0))(embedding)
+        
+        component_distributions = distrax.MultivariateNormalDiag(
+            loc=component_means, scale_diag=component_stds
+        )
+
+        # pi = distrax.Categorical(logits=action_logits)
+        pi = distrax.MixtureSameFamily(
+            mixture_distribution=distrax.Categorical(logits=mixture_logits),
+            components_distribution=component_distributions
+        )
+
+        return hidden, pi
 class CriticRNN(nn.Module):
     
     @nn.compact

@@ -322,9 +322,8 @@ def main(config):
             rng = jax.random.PRNGKey(config["SEED"])
             output = jit_train(rng)
         print("training finished")
-        train_state = jax.tree_util.tree_map(lambda x: x[0], output["runner_state"][0])
-        params = train_state.params
-    else:
+        
+    if config["RENDER"]:
         # Load model parameters
         student_model = ActorRNN(action_dim=gym.make(config["ENV_NAME"]).action_space.shape[0], config=config)
         rng = jax.random.PRNGKey(0)
@@ -345,12 +344,7 @@ def main(config):
         else:
             print(f"Parameters file not found at {params_path}. Please check the path and try again.")
             return
-        
-    
-    
     # rendering code
-    
-    if config["RENDER"]:
         start_time = time.time()
         frames = get_rollout(params, config)
         save_video(frames, f'{config["ENV_NAME"]}_{config["ALG_NAME"]}.mp4')

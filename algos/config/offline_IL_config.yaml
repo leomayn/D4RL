@@ -32,6 +32,6 @@
 "STUDENT_NETWORK_HIDDEN": 128
 "STUDENT_NETWORK_SAVE_PATH": "results/IL_configs/student_network"
 
-"TRAIN": False
+"TRAIN": True
 "RENDER": True
 "ALG_NAME": "offline_il"
