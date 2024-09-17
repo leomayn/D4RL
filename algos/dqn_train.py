@@ -350,14 +350,14 @@ def make_train(config):
                 action = pi.sample(seed=key_a)[0]
                 # reward, il_h_state = generate_reward(il_model, il_params, obs_, action, dones_, il_h_state)
                 # reward = jnp.square(action).sum(axis=-1)
-                reward = jnp.ones_like(env_state.reward)
+                # reward = jnp.ones_like(env_state.reward)
 
                 # STEP ENV
                 env_state = step_fn(env_state, action)
                 obs = env_state.obs
                 done = env_state.done
                 info = env_state.info
-                # reward = env_state.reward
+                reward = env_state.reward
 
                 transition = Transition(last_obs, action, reward, done, info)
 
@@ -392,7 +392,7 @@ def make_train(config):
             def v_function_loss(v_params, obs, actions, dones, target_agent_params, expectile, init_q_hs, init_v_hs):
                 _, v_values = v_network.apply(v_params, init_v_hs, obs, dones)
                 _, target_values = q_network.apply(target_agent_params, init_q_hs, obs, actions, dones)
-                diff = target_values[:-1] - v_values[:-1]
+                diff = target_values - v_values
                 def print_rewards(q_values, bellman_target, update_step):
                     print(f"Update step: {update_step}")
                     for i in range(config["NUM_STEPS"] - 1):
@@ -452,7 +452,6 @@ def make_train(config):
                 rewards_ = learn_traj.rewards
                 dones_ = learn_traj.dones
                 
-                '''
                 print("reward,", rewards_.shape)
                 
                 def print_rewards(rewards, dones, update_step, epoch_num):
@@ -464,7 +463,6 @@ def make_train(config):
                     lambda _: None,
                     operand=None
                 )
-                '''
 
                 q_grad_fn = jax.value_and_grad(q_function_loss, has_aux=False)
                 v_grad_fn = jax.value_and_grad(v_function_loss, has_aux=False)
@@ -661,7 +659,7 @@ def make_train(config):
             first_returns = rewards.sum()
             virtual_returns = virtual_rewards.sum()
             metrics = {
-                # 'test_returns': first_returns,# episode returns
+                'test_returns': first_returns,# episode returns
                 'test_virtual_returns': virtual_returns
             }
             if config.get('VERBOSE', False):

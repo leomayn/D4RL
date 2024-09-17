@@ -2,8 +2,8 @@
 "DISABLE_JIT": False
 "NUM_SEEDS": 1
 "SEED": 30
-"ENV_NAME": "halfcheetah"
-"TEST_ENV_NAME": "halfcheetah"
+"ENV_NAME": "inverted_pendulum"
+"TEST_ENV_NAME": "inverted_pendulum"
 "ENV_KWARGS": {}
 
 
@@ -17,7 +17,7 @@
 "BUFFER_SIZE": 512
 "DEBUG_BUFFER_SIZE": 512
 "BUFFER_BATCH_SIZE": 32
-"TOTAL_TIMESTEPS": 1e5
+"TOTAL_TIMESTEPS": 1e6
 "Q_HIDDEN_DIM": 32
 "V_HIDDEN_DIM": 32
 "AGENT_INIT_SCALE": 1.
