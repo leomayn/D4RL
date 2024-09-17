@@ -69,14 +69,19 @@ class Qnetwork(nn.Module):
     init_scale: float
 
     @nn.compact
-    def __call__(self, obs, action):
+    def __call__(self, hidden, obs, action, dones):
         x = jnp.concatenate([obs, action], axis=-1)
         embedding = nn.Dense(self.hidden_dim, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(x)
         embedding = nn.relu(embedding)
         
+        # add rnn layer
+        rnn_in = (embedding, dones)
+        
+        hidden, embedding = ScannedRNN()(hidden, rnn_in)
+        
         q_vals = nn.Dense(1, kernel_init=orthogonal(self.init_scale), bias_init=constant(0.0))(embedding)
 
-        return jnp.squeeze(q_vals, axis=-1)
+        return hidden, jnp.squeeze(q_vals, axis=-1)
 
 
     
@@ -84,16 +89,21 @@ class Vnetwork(nn.Module):
     hidden_dim: int
 
     @nn.compact
-    def __call__(self, x):
-        world_state = x
+    def __call__(self, hidden, obs, dones):
+        world_state = obs
         embedding = nn.Dense(self.hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(world_state)
         embedding = nn.relu(embedding)
+        
+        # add rnn layer
+        rnn_in = (embedding, dones)
+        
+        hidden, embedding = ScannedRNN()(hidden, rnn_in)
         
         critic = nn.Dense(128, kernel_init=orthogonal(2), bias_init=constant(0.0))(embedding)
         critic = nn.relu(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(critic)
         
-        return jnp.squeeze(critic, axis=-1)
+        return hidden, jnp.squeeze(critic, axis=-1)
 
 
 def save_video(frames, filename='trajectory.mp4'):
@@ -142,7 +152,6 @@ def get_rollout(params, config):
 
 class Transition(NamedTuple):
     obs: jnp.ndarray
-    next_obs: jnp.ndarray
     actions: jnp.ndarray
     rewards: jnp.ndarray
     dones: jnp.ndarray
@@ -192,8 +201,8 @@ def make_train(config):
     
     print("num_updates: ", config["NUM_UPDATES"])
     
-    env = envs.create(config["ENV_NAME"])
-    test_env = envs.create(config["TEST_ENV_NAME"])
+    env = envs.create(env_name=config["ENV_NAME"], episode_length=config["NUM_STEPS"])
+    test_env = envs.create(env_name=config["TEST_ENV_NAME"], episode_length=config["NUM_STEPS"])
     
     # Beginning of IL
     il_model = ActorRNN(action_dim=env.action_size, config=config)
@@ -224,8 +233,8 @@ def make_train(config):
     # INIT NETWORK
     policy_actor = ActorRNN(action_dim=env.action_size, config=config)
     # q network, v network
-    q_network = Qnetwork(action_dim=env.action_size, hidden_dim=config["AGENT_HIDDEN_DIM"], init_scale=config['AGENT_INIT_SCALE'])
-    v_network = Vnetwork(hidden_dim=config["AGENT_HIDDEN_DIM"])
+    q_network = Qnetwork(action_dim=env.action_size, hidden_dim=config["Q_HIDDEN_DIM"], init_scale=config['AGENT_INIT_SCALE'])
+    v_network = Vnetwork(hidden_dim=config["V_HIDDEN_DIM"])
 
     def train(rng):
         # INIT ENV
@@ -257,7 +266,8 @@ def make_train(config):
             dones = env_state.done
             infos = env_state.info
             
-            transition = Transition(last_obs, obs, action, rewards, dones, infos)
+
+            transition = Transition(last_obs, action, rewards, dones, infos)
             return env_state, transition
         
         _, sample_traj = jax.lax.scan(_env_sample_step, env_state, None, config["NUM_STEPS"])
@@ -279,16 +289,31 @@ def make_train(config):
         
         rng, q_rng = jax.random.split(rng)
         rng, v_rng = jax.random.split(rng)
+        init_q_hs = ScannedRNN.initialize_carry(config["Q_HIDDEN_DIM"], 1)
+        init_v_hs = ScannedRNN.initialize_carry(config["V_HIDDEN_DIM"], 1)
         dummy_obs = jnp.zeros((1, 1, env.observation_size))
         dummy_action = jnp.zeros((1, 1, env.action_size))
-        q_params = q_network.init(q_rng, dummy_obs, dummy_action)
-        v_params = v_network.init(v_rng, dummy_obs)
+        dummy_done = jnp.zeros((1, 1))
+        
+        q_params = q_network.init(q_rng, init_q_hs, dummy_obs, dummy_action, dummy_done)
+        v_params = v_network.init(v_rng, init_v_hs, dummy_obs, dummy_done)
 
         # INIT TRAIN STATE AND OPTIMIZER
         tx = optax.chain(
             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
             optax.adam(learning_rate=config['LR'], eps=config['EPS_ADAM']),
         )
+        
+        q_tx = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.adam(learning_rate=config['Q_LR'], eps=config['EPS_ADAM']),
+        )
+        
+        v_tx = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.adam(learning_rate=config['V_LR'], eps=config['EPS_ADAM']),
+        )
+        
         train_state = TrainState.create(
             apply_fn=policy_actor.apply,
             params=network_params,
@@ -298,13 +323,13 @@ def make_train(config):
         q_state = TrainState.create(
             apply_fn=q_network.apply,
             params=q_params,
-            tx=tx,
+            tx=q_tx,
         )
         
         v_state = TrainState.create(
             apply_fn=v_network.apply,
             params=v_params,
-            tx=tx,
+            tx=v_tx,
         )
         
         target_agent_params = jax.tree_util.tree_map(lambda x: jnp.copy(x), q_params)
@@ -323,7 +348,9 @@ def make_train(config):
                 # SELECT ACTION
                 hstate, pi = policy_actor.apply(params, hstate, (obs_, dones_))
                 action = pi.sample(seed=key_a)[0]
-                reward, il_h_state = generate_reward(il_model, il_params, obs_, action, dones_, il_h_state)
+                # reward, il_h_state = generate_reward(il_model, il_params, obs_, action, dones_, il_h_state)
+                # reward = jnp.square(action).sum(axis=-1)
+                reward = jnp.ones_like(env_state.reward)
 
                 # STEP ENV
                 env_state = step_fn(env_state, action)
@@ -331,7 +358,8 @@ def make_train(config):
                 done = env_state.done
                 info = env_state.info
                 # reward = env_state.reward
-                transition = Transition(last_obs, obs, action, reward, done, info)  # Empty info dict
+
+                transition = Transition(last_obs, action, reward, done, info)
 
                 step_state = (params, env_state, obs, done.astype(bool), hstate, il_h_state, rng, t+1)
                 return step_state, transition
@@ -361,30 +389,51 @@ def make_train(config):
 
             # LEARNING PHASE
             
-            def v_function_loss(v_params, obs, actions, target_agent_params, expectile):
-                """Compute the loss for the V-function using expectile regression."""
-                v_values = v_network.apply(v_params, obs)
-                target_values = q_network.apply(target_agent_params, obs, actions)
-                diff = target_values - v_values
+            def v_function_loss(v_params, obs, actions, dones, target_agent_params, expectile, init_q_hs, init_v_hs):
+                _, v_values = v_network.apply(v_params, init_v_hs, obs, dones)
+                _, target_values = q_network.apply(target_agent_params, init_q_hs, obs, actions, dones)
+                diff = target_values[:-1] - v_values[:-1]
+                def print_rewards(q_values, bellman_target, update_step):
+                    print(f"Update step: {update_step}")
+                    for i in range(config["NUM_STEPS"] - 1):
+                        print(f"Timestep: {i + 1}, target: {q_values[i][0]}, v_Values: {bellman_target[i][0]}")
+                _ = jax.lax.cond(
+                    (time_state['updates'] % 1000 == 0),
+                    lambda _: jax.debug.callback(print_rewards, target_values, v_values, time_state['updates']),
+                    lambda _: None,
+                    operand=None
+                )
                 loss = jnp.where(diff > 0, expectile * diff**2, (1 - expectile) * diff**2)
                 
                 return jnp.mean(loss)
             
-            def q_function_loss(q_params, obs, actions, rewards, dones, next_obs, discount, v_params):
-                """Compute the loss for the Q-function."""
-                q_values = q_network.apply(q_params, obs, actions)
+            def q_function_loss(q_params, obs, actions, rewards, dones, discount, v_params, init_q_hs, init_v_hs):
                 
-                next_v_values = v_network.apply(v_params, next_obs)
+                _, q_values = q_network.apply(q_params, init_q_hs, obs, actions, dones)
                 
-                bellman_target = rewards + discount * next_v_values * (1 - dones)
+                _, next_v_values = v_network.apply(v_params, init_v_hs, obs, dones)
+                
+                q_values = q_values[:-1]
+                next_v_values = next_v_values[1:]
+                
+                bellman_target = rewards[:-1] + discount * next_v_values * (1 - dones[1:])
                 
                 td_error = q_values - bellman_target
+                def print_rewards(q_values, bellman_target, update_step):
+                    print(f"Update step: {update_step}")
+                    for i in range(config["NUM_STEPS"] - 1):
+                        print(f"Timestep: {i + 1}, Q_values: {q_values[i][0]}, Bellman target: {bellman_target[i][0]}")
+                _ = jax.lax.cond(
+                    (time_state['updates'] % 1000 == 0),
+                    lambda _: jax.debug.callback(print_rewards, q_values, bellman_target, time_state['updates']),
+                    lambda _: None,
+                    operand=None
+                )
                 loss = jnp.mean(td_error**2)
                 
                 return loss
             
             def advantage_weighted_regression_loss(params, obs, actions, dones, h_state, advantages, temperature):
-                """AWR loss for policy extraction"""
                 h_state, pi = policy_actor.apply(params, h_state, (obs, dones))
                 log_probs = pi.log_prob(actions)
 
@@ -394,16 +443,28 @@ def make_train(config):
                 return loss
             
             def compute_advantage(q_values, v_values):
-                """Compute the advantage as A(s, a) = Q(s, a) - V(s)"""
                 return q_values - v_values
 
 
-            def _loss_fn(train_state, target_agent_params, init_hs, learn_traj, expectile, discount, temperature, v_state, q_state):
+            def _loss_fn(train_state, target_agent_params, init_hs, init_q_hs, init_v_hs, learn_traj, expectile, discount, temperature, v_state, q_state, epoch_num):
                 obs_ = learn_traj.obs
                 actions_ = learn_traj.actions
                 rewards_ = learn_traj.rewards
                 dones_ = learn_traj.dones
-                next_obs_ = learn_traj.next_obs
+                
+                '''
+                print("reward,", rewards_.shape)
+                
+                def print_rewards(rewards, dones, update_step, epoch_num):
+                    print(f"Update step: {update_step}, Epoch num: {epoch_num}")
+                    print(f"Rewards: {rewards}, Dones: {dones}")
+                _ = jax.lax.cond(
+                    (time_state['updates'] % 1000 == 0) & (epoch_num == 1),
+                    lambda _: jax.debug.callback(print_rewards, rewards_, dones_, time_state['updates'], epoch_num),
+                    lambda _: None,
+                    operand=None
+                )
+                '''
 
                 q_grad_fn = jax.value_and_grad(q_function_loss, has_aux=False)
                 v_grad_fn = jax.value_and_grad(v_function_loss, has_aux=False)
@@ -413,11 +474,14 @@ def make_train(config):
                         v_state.params,
                         obs_,
                         actions_,
+                        dones_,
                         target_agent_params,
-                        expectile
+                        expectile,
+                        init_q_hs,
+                        init_v_hs
                     )
                 v_state.apply_gradients(grads=v_grads)
-                v_values = v_network.apply(v_state.params, obs_)
+                _, v_values = v_network.apply(v_state.params, init_v_hs, obs_, dones_)
                 
                 q_loss, q_grads = q_grad_fn(
                         q_state.params,
@@ -425,11 +489,27 @@ def make_train(config):
                         actions_,
                         rewards_,
                         dones_,
-                        next_obs_,
                         discount,
-                        v_state.params)
+                        v_state.params,
+                        init_q_hs,
+                        init_v_hs
+                    )
                 q_state.apply_gradients(grads=q_grads)
-                q_vals = q_network.apply(q_state.params, obs_, actions_)
+                _, q_vals = q_network.apply(q_state.params, init_q_hs, obs_, actions_, dones_)
+                
+                '''
+                print("shape,", q_vals.shape)
+                def print_values(q_vals, v_values, update_step, epoch_num):
+                    print(f"Update step: {update_step}, Epoch num: {epoch_num}")
+                    for i in range(config["NUM_STEPS"]):
+                        print(f"Timestep: {i + 1},  Q-values: {q_vals[i][0]}, V-values: {v_values[i][0]}")
+                _ = jax.lax.cond(
+                    time_state['updates'] % 1000 == 0,
+                    lambda _: jax.debug.callback(print_values, q_vals, v_values, time_state['updates'], epoch_num),
+                    lambda _: None,
+                    operand=None
+                )
+                '''
                 
                 advantages = compute_advantage(q_vals, v_values)
                 loss, grads = grad_fn(
@@ -445,14 +525,37 @@ def make_train(config):
 
                 return (q_loss, v_loss, loss)
 
-            rng, _rng = jax.random.split(rng)
-            learn_traj = buffer.sample(buffer_state, _rng).experience
-            learn_traj = jax.tree_util.tree_map(
-                lambda x: jnp.swapaxes(x[:, 0], 0, 1), 
-                learn_traj
-            )
-            init_hs = ScannedRNN.initialize_carry(config["POLICY_HIDDEN"], config["BUFFER_BATCH_SIZE"])
-            q_loss, v_loss, loss = _loss_fn(train_state, target_agent_params, init_hs, learn_traj, config['EXPECTILE'], config['GAMMA'], config["BETA"], v_state, q_state)
+            def run_for_epochs(train_state, target_agent_params, buffer, buffer_state, config, v_state, q_state, rng, num_epochs=10):
+                def epoch_step(carry, _):
+                    rng, train_state, target_agent_params, buffer_state, v_state, q_state, epoch_num = carry
+
+                    rng, _rng = jax.random.split(rng)
+                    learn_traj = buffer.sample(buffer_state, _rng).experience
+                    learn_traj = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x[:, 0], 0, 1), learn_traj)
+
+                    init_hs = ScannedRNN.initialize_carry(config["POLICY_HIDDEN"], config["BUFFER_BATCH_SIZE"])
+                    init_q_hs = ScannedRNN.initialize_carry(config["Q_HIDDEN_DIM"], config["BUFFER_BATCH_SIZE"])
+                    init_v_hs = ScannedRNN.initialize_carry(config["V_HIDDEN_DIM"], config["BUFFER_BATCH_SIZE"])
+
+                    q_loss, v_loss, loss = _loss_fn(train_state, target_agent_params, init_hs, init_q_hs, init_v_hs, learn_traj, config['EXPECTILE'], config['GAMMA'], config["BETA"], v_state, q_state, epoch_num)
+
+                    total_losses = (q_loss, v_loss, loss)
+
+                    return (rng, train_state, target_agent_params, buffer_state, v_state, q_state, epoch_num + 1), total_losses
+
+                initial_carry = (rng, train_state, target_agent_params, buffer_state, v_state, q_state, 1)
+
+                final_carry, all_losses = jax.lax.scan(epoch_step, initial_carry, None, length=num_epochs)
+
+                q_losses, v_losses, total_losses = all_losses
+
+                avg_q_loss = jnp.mean(q_losses)
+                avg_v_loss = jnp.mean(v_losses)
+                avg_loss = jnp.mean(total_losses)
+
+                return avg_q_loss, avg_v_loss, avg_loss
+            q_loss, v_loss, loss = run_for_epochs(train_state, target_agent_params, buffer, buffer_state, config, v_state, q_state, rng, config["NUM_EPOCHS"])
+
             
 
             rng, _rng = jax.random.split(rng)
@@ -486,7 +589,7 @@ def make_train(config):
                 'loss': loss,
                 'q_loss': q_loss,
                 'v_loss': v_loss,
-                'rewards': traj_batch.rewards.sum(),
+                'rewards': jnp.sum(traj_batch.rewards, axis=0).mean(),
             }
             metrics['test_metrics'] = test_metrics # add the test metrics dictionary
 
@@ -530,8 +633,9 @@ def make_train(config):
                 dones_ = last_dones[np.newaxis, :]
                 hstate, pi = policy_actor.apply(params, hstate, (obs_, dones_))
                 action = pi.sample(seed=key_a)[0]
-                virtual_reward, il_h_state = generate_reward(il_model, il_params, obs_, action, dones_, il_h_state)
+                # virtual_reward, il_h_state = generate_reward(il_model, il_params, obs_, action, dones_, il_h_state)
                 # virtual_reward = 0
+                virtual_reward = jnp.square(action).sum(axis=-1)
                 env_state = test_step_fn(env_state, action)
                 step_state = (params, env_state, env_state.obs, env_state.done.astype(bool), hstate, il_h_state, rng)
                 return step_state, (env_state.reward, virtual_reward, env_state.done, env_state.info)
@@ -557,7 +661,7 @@ def make_train(config):
             first_returns = rewards.sum()
             virtual_returns = virtual_rewards.sum()
             metrics = {
-                'test_returns': first_returns,# episode returns
+                # 'test_returns': first_returns,# episode returns
                 'test_virtual_returns': virtual_returns
             }
             if config.get('VERBOSE', False):
@@ -604,7 +708,7 @@ def main(config):
 
     env_name = config["ENV_NAME"]
     
-    config["NUM_STEPS"] = gym.make(config["GYM_NAME"])._max_episode_steps
+    # config["NUM_STEPS"] = gym.make(config["GYM_NAME"])._max_episode_steps
 
     wandb.init(
         entity=config["ENTITY"],

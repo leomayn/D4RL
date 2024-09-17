@@ -1,0 +1,30 @@
+wandb_version: 1
+
+BETA:
+  value: 5
+BUFFER_BATCH_SIZE:
+  value: 64
+BUFFER_SIZE:
+  value: 2048
+EXPECTILE:
+  value: 0.1
+GAMMA:
+  value: 0.99
+LR:
+  value: 0.0001
+MAX_GRAD_NORM:
+  value: 1
+NUM_ENVS:
+  value: 8
+POLICY_HIDDEN:
+  value: 128
+Q_HIDDEN_DIM:
+  value: 64
+Q_LR:
+  value: 1.0e-05
+TARGET_UPDATE_INTERVAL:
+  value: 20
+V_HIDDEN_DIM:
+  value: 128
+V_LR:
+  value: 1.0e-06

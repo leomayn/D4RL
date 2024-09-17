@@ -1,0 +1,178 @@
+wandb_version: 1
+
+DEBUG:
+  desc: null
+  value: false
+DISABLE_JIT:
+  desc: null
+  value: false
+NUM_SEEDS:
+  desc: null
+  value: 5
+SEED:
+  desc: null
+  value: 30
+ENV_NAME:
+  desc: null
+  value: halfcheetah
+TEST_ENV_NAME:
+  desc: null
+  value: halfcheetah
+ENV_KWARGS:
+  desc: null
+  value: {}
+SAVE_PATH:
+  desc: null
+  value: results/DQN/dqn_network
+NUM_ENVS:
+  desc: null
+  value: 8
+NUM_STEPS:
+  desc: null
+  value: 1000
+BUFFER_SIZE:
+  desc: null
+  value: 512
+DEBUG_BUFFER_SIZE:
+  desc: null
+  value: 512
+BUFFER_BATCH_SIZE:
+  desc: null
+  value: 32
+TOTAL_TIMESTEPS:
+  desc: null
+  value: 5000000.0
+Q_HIDDEN_DIM:
+  desc: null
+  value: 32
+V_HIDDEN_DIM:
+  desc: null
+  value: 32
+AGENT_INIT_SCALE:
+  desc: null
+  value: 2.0
+EPSILON_START:
+  desc: null
+  value: 1.0
+EPSILON_FINISH:
+  desc: null
+  value: 0.05
+EPSILON_ANNEAL_TIME:
+  desc: null
+  value: 100000
+MAX_GRAD_NORM:
+  desc: null
+  value: 10
+TARGET_UPDATE_INTERVAL:
+  desc: null
+  value: 1000
+LR:
+  desc: null
+  value: 0.0005
+Q_LR:
+  desc: null
+  value: 0.0005
+V_LR:
+  desc: null
+  value: 0.0005
+LR_LINEAR_DECAY:
+  desc: null
+  value: false
+EPS_ADAM:
+  desc: null
+  value: 0.0001
+WEIGHT_DECAY_ADAM:
+  desc: null
+  value: 1.0e-05
+TD_LAMBDA_LOSS:
+  desc: null
+  value: false
+TD_LAMBDA:
+  desc: null
+  value: 0.6
+BETA:
+  desc: null
+  value: 1
+GAMMA:
+  desc: null
+  value: 0.99
+VERBOSE:
+  desc: null
+  value: false
+WANDB_ONLINE_REPORT:
+  desc: null
+  value: true
+NUM_TEST_EPISODES:
+  desc: null
+  value: 32
+TEST_INTERVAL:
+  desc: null
+  value: 50000
+POLICY_HIDDEN:
+  desc: null
+  value: 64
+EXPECTILE:
+  desc: null
+  value: 0.5
+WANDB_MODE:
+  desc: null
+  value: online
+ENTITY:
+  desc: null
+  value: marlhf
+PROJECT:
+  desc: null
+  value: DQN
+PROJECT_PREFIX:
+  desc: null
+  value: ''
+IL_NETWORK_HIDDEN:
+  desc: null
+  value: 128
+IL_NETWORK_SAVE_PATH:
+  desc: null
+  value: results/IL_configs/student_network
+TRAIN:
+  desc: null
+  value: true
+GYM_NAME:
+  desc: null
+  value: HalfCheetah
+DEBUG_STEPS:
+  desc: null
+  value: 10000.0
+RENDER:
+  desc: null
+  value: true
+ALG_NAME:
+  desc: null
+  value: dqn
+_wandb:
+  desc: null
+  value:
+    python_version: 3.10.0
+    cli_version: 0.17.4
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1726263448
+    t:
+      1:
+      - 12
+      - 45
+      - 50
+      - 55
+      2:
+      - 12
+      - 45
+      - 50
+      - 55
+      3:
+      - 13
+      - 15
+      - 16
+      - 23
+      4: 3.10.0
+      5: 0.17.4
+      8:
+      - 5
+      13: linux-x86_64

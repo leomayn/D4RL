@@ -1,0 +1,1 @@
+{"virtual_returns": 10.0, "timestep": 100000, "updates": 1250, "loss": 5.765864372253418, "q_loss": 4.195564270019531, "v_loss": 1.3107516765594482, "test_virtual_returns": 1918.4432373046875, "_timestamp": 1726499169.583675, "_runtime": 184.0923159122467, "_step": 1249, "_wandb": {"runtime": 184}}
