@@ -1,5 +1,5 @@
 import os 
-os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 os.environ['PYOPENGL_PLATFORM'] = 'egl'
 os.environ['MUJOCO_GL'] = 'egl'
 os.environ['D4RL_SUPPRESS_IMPORT_ERROR'] = '1'
@@ -259,6 +259,7 @@ def make_train(config):
                 print(f"Epoch: {epoch}, test return: {test_return}, IL loss: {IL_loss}")
                 # if update_step == 1 or test_return > max(best_test_return, -15) and update_step > 500:
                 # if update_step == 200 or test_return > max(best_test_return, -15) and update_step > 200:
+                '''
                 if tested_times == config["NUM_EPOCHS"]//config["TEST_INTERVAL"] - 1:
                     if not os.path.exists(config["STUDENT_NETWORK_SAVE_PATH"]):
                         os.makedirs(config["STUDENT_NETWORK_SAVE_PATH"])
@@ -266,6 +267,7 @@ def make_train(config):
                     with open(file_path, "wb") as f:
                         f.write(serialization.to_bytes(params))
                     print(f"Saved the best model to {file_path} with test return {test_return}")
+                '''
             jax.experimental.io_callback(callback, None, student_train_state.params, tested_times, test_return, best_test_return, IL_loss, test_states, test_obs)
             
             runner_state = (
@@ -311,8 +313,8 @@ def main(config):
         tags=["None"],
         name=wandb_name,
         config=config,
-        # mode=config["WANDB_MODE"],
-        mode='disabled',
+        mode=config["WANDB_MODE"],
+        # mode='disabled',
     )
     
     if config["TRAIN"]:
