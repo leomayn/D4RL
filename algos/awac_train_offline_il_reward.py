@@ -6,7 +6,7 @@ from absl import app, flags
 from ml_collections import config_flags
 from tensorboardX import SummaryWriter
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 from jaxrl.agents import BCLearner, AWACLearner
 from jaxrl.datasets import make_env_and_dataset
@@ -20,8 +20,8 @@ from flax import serialization
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'hopper-expert-v2', 'Environment name.')
-flags.DEFINE_string('il_env_name', 'hopper-medium-expert-v2', 'IL Environment name.')
+flags.DEFINE_string('env_name', 'halfcheetah-expert-v2', 'Environment name.')
+flags.DEFINE_string('il_env_name', 'halfcheetah-medium-expert-v2', 'IL Environment name.')
 flags.DEFINE_integer('il_network_hidden', 128, 'IL network hidden.')
 flags.DEFINE_string('il_network_save_path', 'results/IL_configs/student_network', 'IL network hidden.')
 flags.DEFINE_enum('dataset_name', 'd4rl', ['d4rl', 'awac', 'rl_unplugged'],
@@ -97,24 +97,31 @@ def main(_):
     obs = dataset.observations
     action = dataset.actions
     dones = dataset.dones_float
-    
-    trajectory_length = 1000 # hardcoded for halfcheetah
     num_samples = obs.shape[0]
+    
+    '''
+    trajectory_length = 1000 # hardcoded for halfcheetah
     batch_size = num_samples // trajectory_length
 
     obs = obs.reshape(trajectory_length, batch_size, obs.shape[1])
     action = action.reshape(trajectory_length, batch_size, action.shape[1])
     dones = dones.reshape(trajectory_length, batch_size)
-
+    '''
+    
+    obs = obs[np.newaxis, :]
+    action = action[np.newaxis, :]
+    dones = dones[np.newaxis, :]
     
     print("obs: ", obs.shape)
     
-    init_hs = ScannedRNN.initialize_carry(batch_size, il_network_hidden)
+    # init_hs = ScannedRNN.initialize_carry(batch_size, il_network_hidden)
+    init_hs = ScannedRNN.initialize_carry(num_samples, il_network_hidden)
     
     reward, _ = generate_reward(il_model, il_params, obs, action, dones, init_hs)
     
-    reward = reward.reshape(num_samples)
+    # reward = reward.reshape(num_samples)
     
+    reward = jnp.squeeze(reward, axis=0)
     print("reward: ", reward.shape)
 
     dataset.rewards = reward
