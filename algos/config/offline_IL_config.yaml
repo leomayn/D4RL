@@ -1,10 +1,10 @@
 "DEBUG": False
 "DISABLE_JIT": False
 "SEED": 3
-"ENV_NAME": "halfcheetah-medium-expert-v2"
-"TEST_ENV_NAME": "halfcheetah"
-# "ENV_NAME": "hopper-medium-expert-v2"
-# "TEST_ENV_NAME": "hopper"
+# "ENV_NAME": "halfcheetah-medium-expert-v2"
+# "TEST_ENV_NAME": "halfcheetah"
+"ENV_NAME": "hopper-medium-expert-v2"
+"TEST_ENV_NAME": "hopper"
 # "ENV_NAME": "antmaze-umaze-v2"
 # "TEST_ENV_NAME": "ant"
 "ENV_KWARGS": {}

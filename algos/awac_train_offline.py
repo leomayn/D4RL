@@ -14,7 +14,7 @@ from jaxrl.evaluation import evaluate
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'halfcheetah-expert-v2', 'Environment name.')
+flags.DEFINE_string('env_name', 'hopper-expert-v2', 'Environment name.')
 flags.DEFINE_enum('dataset_name', 'd4rl', ['d4rl', 'awac', 'rl_unplugged'],
                   'Dataset name.')
 flags.DEFINE_string('save_dir', './tmp/', 'Tensorboard logging dir.')
@@ -41,7 +41,7 @@ config_flags.DEFINE_config_file(
 
 def main(_):
     summary_writer = SummaryWriter(
-        os.path.join(FLAGS.save_dir, 'tb', str(FLAGS.seed)))
+        os.path.join(FLAGS.save_dir, 'tb', FLAGS.env_name, 'true'))
 
     video_save_folder = None if not FLAGS.save_video else os.path.join(
         FLAGS.save_dir, 'video', 'eval')
@@ -84,7 +84,7 @@ def main(_):
             summary_writer.flush()
 
             eval_returns.append((i, eval_stats['return']))
-            np.savetxt(os.path.join(FLAGS.save_dir, f'{FLAGS.seed}.txt'),
+            np.savetxt(os.path.join(FLAGS.save_dir, f'{FLAGS.env_name}_true.txt'),
                        eval_returns,
                        fmt=['%d', '%.1f'])
 

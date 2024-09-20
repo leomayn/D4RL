@@ -20,7 +20,10 @@ from flax import serialization
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'halfcheetah-expert-v2', 'Environment name.')
+flags.DEFINE_string('env_name', 'hopper-expert-v2', 'Environment name.')
+flags.DEFINE_string('il_env_name', 'hopper-medium-expert-v2', 'IL Environment name.')
+flags.DEFINE_integer('il_network_hidden', 128, 'IL network hidden.')
+flags.DEFINE_string('il_network_save_path', 'results/IL_configs/student_network', 'IL network hidden.')
 flags.DEFINE_enum('dataset_name', 'd4rl', ['d4rl', 'awac', 'rl_unplugged'],
                   'Dataset name.')
 flags.DEFINE_string('save_dir', './tmp/', 'Tensorboard logging dir.')
@@ -48,7 +51,7 @@ config_flags.DEFINE_config_file(
 
 def main(_):
     summary_writer = SummaryWriter(
-        os.path.join(FLAGS.save_dir, 'tb', str(FLAGS.seed)))
+        os.path.join(FLAGS.save_dir, 'tb', FLAGS.env_name, 'virtual'))
 
     video_save_folder = None if not FLAGS.save_video else os.path.join(
         FLAGS.save_dir, 'video', 'eval')
@@ -59,8 +62,8 @@ def main(_):
     
     # Beginning of IL
     
-    il_network_hidden = 128
-    il_network_save_path = "results/IL_configs/student_network"
+    il_network_hidden = FLAGS.il_network_hidden
+    il_network_save_path = FLAGS.il_network_save_path
     
     def generate_reward(il_model, il_params, obs, action, done, il_h_state):
         in_data = (obs, done)
@@ -77,7 +80,7 @@ def main(_):
     _s_init_h = ScannedRNN.initialize_carry(1, il_network_hidden)
 
     init_params = il_model.init(_s_init_rng, _s_init_h, _s_init_x)
-    params_path = os.path.join(il_network_save_path, 'final.msgpack')
+    params_path = os.path.join(il_network_save_path, f'{FLAGS.il_env_name}_final.msgpack')
 
     if os.path.exists(params_path):
         with open(params_path, "rb") as f:
@@ -152,7 +155,7 @@ def main(_):
             summary_writer.flush()
 
             eval_returns.append((i, eval_stats['return']))
-            np.savetxt(os.path.join(FLAGS.save_dir, f'{FLAGS.seed}.txt'),
+            np.savetxt(os.path.join(FLAGS.save_dir, f'{FLAGS.env_name}_virtual.txt'),
                        eval_returns,
                        fmt=['%d', '%.1f'])
 

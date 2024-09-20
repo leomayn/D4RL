@@ -259,15 +259,13 @@ def make_train(config):
                 print(f"Epoch: {epoch}, test return: {test_return}, IL loss: {IL_loss}")
                 # if update_step == 1 or test_return > max(best_test_return, -15) and update_step > 500:
                 # if update_step == 200 or test_return > max(best_test_return, -15) and update_step > 200:
-                '''
                 if tested_times == config["NUM_EPOCHS"]//config["TEST_INTERVAL"] - 1:
                     if not os.path.exists(config["STUDENT_NETWORK_SAVE_PATH"]):
                         os.makedirs(config["STUDENT_NETWORK_SAVE_PATH"])
-                    file_path = os.path.join(config["STUDENT_NETWORK_SAVE_PATH"], 'final.msgpack')
+                    file_path = os.path.join(config["STUDENT_NETWORK_SAVE_PATH"], f'{config["ENV_NAME"]}_final.msgpack')
                     with open(file_path, "wb") as f:
                         f.write(serialization.to_bytes(params))
                     print(f"Saved the best model to {file_path} with test return {test_return}")
-                '''
             jax.experimental.io_callback(callback, None, student_train_state.params, tested_times, test_return, best_test_return, IL_loss, test_states, test_obs)
             
             runner_state = (
