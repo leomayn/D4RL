@@ -14,7 +14,7 @@ from jaxrl.evaluation import evaluate
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'hopper-expert-v2', 'Environment name.')
+flags.DEFINE_string('env_name', 'walker2d-expert-v2', 'Environment name.')
 flags.DEFINE_enum('dataset_name', 'd4rl', ['d4rl', 'awac', 'rl_unplugged'],
                   'Dataset name.')
 flags.DEFINE_string('save_dir', './tmp/', 'Tensorboard logging dir.')

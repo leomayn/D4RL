@@ -1,0 +1,104 @@
+wandb_version: 1
+
+algo:
+  desc: null
+  value: AWAC
+project:
+  desc: null
+  value: train-AWAC
+env_name:
+  desc: null
+  value: halfcheetah-medium-expert-v2
+seed:
+  desc: null
+  value: 42
+eval_episodes:
+  desc: null
+  value: 5
+log_interval:
+  desc: null
+  value: 1000
+eval_interval:
+  desc: null
+  value: 10000
+batch_size:
+  desc: null
+  value: 256
+max_steps:
+  desc: null
+  value: 1000000
+n_jitted_updates:
+  desc: null
+  value: 8
+data_size:
+  desc: null
+  value: 1000000
+normalize_state:
+  desc: null
+  value: false
+actor_hidden_dims:
+  desc: null
+  value:
+  - 256
+  - 256
+  - 256
+  - 256
+critic_hidden_dims:
+  desc: null
+  value:
+  - 256
+  - 256
+actor_lr:
+  desc: null
+  value: 0.0003
+critic_lr:
+  desc: null
+  value: 0.0003
+beta:
+  desc: null
+  value: 1.0
+tau:
+  desc: null
+  value: 0.005
+discount:
+  desc: null
+  value: 0.99
+reward_type:
+  desc: null
+  value: virtual
+il_hidden_dim:
+  desc: null
+  value: 128
+il_network_save_path:
+  desc: null
+  value: results/IL_configs/student_network
+il_env_name:
+  desc: null
+  value: halfcheetah-medium-expert-v2
+_wandb:
+  desc: null
+  value:
+    python_version: 3.10.0
+    cli_version: 0.17.4
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1726884943
+    t:
+      1:
+      - 12
+      - 45
+      - 55
+      2:
+      - 12
+      - 45
+      - 55
+      3:
+      - 2
+      - 16
+      - 23
+      - 61
+      4: 3.10.0
+      5: 0.17.4
+      8:
+      - 5
+      13: linux-x86_64

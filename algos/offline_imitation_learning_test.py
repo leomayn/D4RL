@@ -1,5 +1,5 @@
 import os 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ['PYOPENGL_PLATFORM'] = 'egl'
 os.environ['MUJOCO_GL'] = 'egl'
 os.environ['D4RL_SUPPRESS_IMPORT_ERROR'] = '1'
@@ -18,6 +18,7 @@ from functools import partial
 import matplotlib.animation as animation
 import wandb
 import pickle
+import tqdm
 
 from utils.networks import ActorRNN, AgentRNN, ScannedRNN, RewardModel, RewardModelFF, print_jnp_shapes
 from utils.jax_dataloader import Trajectory, ILDataLoader
@@ -87,9 +88,6 @@ def get_rollout(params, config):
 def make_train(config):
     
     env = gym.make(config["ENV_NAME"])
-    test_env = envs.get_environment(config["TEST_ENV_NAME"])
-    test_reset_fn = jax.jit(jax.vmap(test_env.reset))
-    test_step_fn = jax.jit(jax.vmap(test_env.step))
     # if config["TEACHER_NETWORK_TYPE"] == "Qfn":
     config["NUM_ACTORS"] = 1 * config["NUM_ENVS"]
     config["NUM_TEST_ACTORS"] = 1 * config["NUM_TEST_ENVS"]
@@ -152,13 +150,21 @@ def make_train(config):
         
         def _train_epochs_and_one_test(runner_state, tested_times):
             student_train_state, rng, best_test_return = runner_state
-            def _train_epoch(IL_training_state, after_test):
+
+            # Replace _train_epoch scan with for loop
+            IL_training_state = (student_train_state, rng)
+            IL_losses = []
+            for _ in range(config["TEST_INTERVAL"]):
                 student_train_state, rng = IL_training_state
                 num_iterations = data_loader._data_size // config["BATCH_SIZE"]
                 print("num itr:", num_iterations)
-                def _train_minibatch(student_train_state, unused):
+                
+                # Replace _train_minibatch scan with for loop
+                minibatch_losses = []
+                for _ in range(num_iterations):
                     minibatch, s_h_state = data_loader._get_batch()
                     minibatch = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1), minibatch)
+                    
                     def _IL_loss_fn(student_params, s_h_state, minibatch):
                         obs = minibatch['obs']
                         done = minibatch['done']
@@ -166,128 +172,89 @@ def make_train(config):
                         
                         # forward pass
                         in_data = (obs, done)
-                        s_h_state, pi = student_model.apply(student_params, s_h_state, in_data)
-                        
-                        print("act dim:", teacher_act.shape)
+                        jit_apply = jax.jit(student_model.apply)
+                        s_h_state, pi = jit_apply(student_params, s_h_state, in_data)
+  
                         
                         # compute loss
-                        # loss = -pi.log_prob(teacher_act)
-                        # loss = jnp.mean(loss)
-                        
                         student_act_mean = pi.mean()  # Mean of the distribution
                         loss = jnp.mean(jnp.square(student_act_mean - teacher_act))  # MSE loss
                         
                         return loss
+                    
                     grad_fn = jax.value_and_grad(_IL_loss_fn)
                     loss, grad = grad_fn(student_train_state.params, s_h_state, minibatch)
-                    
                     data_loader.update_hidden_state(s_h_state)
-                    
                     student_train_state = student_train_state.apply_gradients(grads=grad)
-                    return student_train_state, loss
+                    minibatch_losses.append(loss)
                 
-                student_train_state, IL_losses = jax.lax.scan(
-                    _train_minibatch, student_train_state, jnp.arange(num_iterations)
-                )
-                IL_training_state = (
-                    student_train_state,
-                    rng,
-                )
-                return IL_training_state, IL_losses
-            
-            IL_training_state = (
-                student_train_state,
-                rng,
-            )
-            
-            IL_training_state, IL_losses = jax.lax.scan(
-                _train_epoch, IL_training_state, jnp.arange(config["TEST_INTERVAL"])
-            )
-            IL_loss = IL_losses.mean()
-            # def print_loss(loss):
-            #     print("IL loss:", loss)
-            # jax.experimental.io_callback(print_loss, None, IL_losses)
-            
-            student_train_state, rng = IL_training_state
-            # test the student model
-            def _test_step(test_state, unused):
-                s_state, test_env_state, test_h_state, rng = test_state
-                test_obs = test_env_state.obs
-                test_done = test_env_state.done
-                # test_obs_batch = batchify(test_obs, env.agents, config["NUM_TEST_ACTORS"])
-                test_in = (test_obs[np.newaxis, :], test_done[np.newaxis, :])
-                
-                # test_h_state, q_vals = teacher_model.apply(t_network_params, test_h_state, test_in)
-                # test_act = jnp.argmax(q_vals, axis=-1)[0]
-                # print("test_act", test_act)
-                # raise ValueError
-                
-                test_h_state, pi = student_model.apply(s_state.params, test_h_state, test_in)
-                test_act = pi.sample(seed=rng)[0]
-                
-                # test_act = unbatchify(test_act, env.agents, config["NUM_TEST_ENVS"], 1)
-                test_env_state = test_step_fn(test_env_state, test_act)
-                test_info = test_env_state.info
-                test_info = jax.tree_util.tree_map(lambda x: x.reshape((config["NUM_TEST_ACTORS"])), test_info)
-                test_rewards = test_env_state.reward
-                # test_done_batch = batchify(test_dones, env.agents, config["NUM_TEST_ACTORS"]).squeeze()
-                
-                test_state = (s_state, test_env_state, test_h_state, rng)
-                # return test_state, (batchify(test_rewards, env.agents, config["NUM_TEST_ACTORS"]).mean(), test_env_state, test_obs)
-                return test_state, (test_rewards.mean(), test_env_state, test_obs)
-            _test_rng, rng = jax.random.split(rng)
-            _test_rngs = jax.random.split(_test_rng, config["NUM_TEST_ENVS"])
-            test_env_state  = test_reset_fn(_test_rngs)
+                IL_training_state = (student_train_state, rng)
+                # fix the jax.errors.TracerArrayConversionError in the following line
+                IL_losses.append(jnp.mean(jnp.array(minibatch_losses)))
 
-            test_state = (
-                student_train_state,
-                test_env_state,
-                ScannedRNN.initialize_carry(config["NUM_TEST_ACTORS"], config["STUDENT_NETWORK_HIDDEN"]),
-                rng,
-            )
-            test_state, test_rewards_states=jax.lax.scan(
-                _test_step, test_state, jnp.arange(config["NUM_TEST_STEPS"])
-            )
-            test_rewards, test_states, test_obs = test_rewards_states
-            student_train_state = test_state[0]
-            test_return = test_rewards.sum()
-            def callback(params, tested_times, test_return, best_test_return, IL_loss, test_states, test_obs):
+            
+            IL_loss = jnp.mean(jnp.array(IL_losses))
+            student_train_state, rng = IL_training_state
+
+            # Test loop with jax
+            total_rewards = []
+            for _ in range(config["NUM_TEST_ENVS"]):
+                obs = env.reset()
+                test_done = jnp.zeros((1,))
+                test_h_state = ScannedRNN.initialize_carry(1, config["STUDENT_NETWORK_HIDDEN"])
+                print("epoch:", tested_times)
+                print("test episode:", _)
+
+                # for _ in range(config["NUM_TEST_STEPS"]):
+                with tqdm.tqdm(range(1, config["NUM_TEST_STEPS"])) as pbar:
+                    for _ in pbar:
+                        test_done = jnp.atleast_1d(test_done)
+
+                        test_in = (obs[jnp.newaxis, jnp.newaxis, :], jnp.array(test_done)[jnp.newaxis, :])
+                        jax_apply = jax.jit(student_model.apply)
+                        test_h_state, pi = jax_apply(student_train_state.params, test_h_state, test_in)
+                        test_act = pi.sample(seed=rng).squeeze()
+                        # Convert test_act to a NumPy array outside the traced context
+                        
+                        obs, test_reward, test_done, test_info = env.step(test_act)
+
+                total_rewards.append(test_reward)
+
+            test_return = jnp.mean(jnp.array(total_rewards))
+
+            # Callback and final state update
+            # Replace jax.experimental.io_callback with a direct function call
+            def run_callback(params, tested_times, test_return, best_test_return, IL_loss):
                 epoch = tested_times * config["TEST_INTERVAL"]
-                wandb.log({"test_return": test_return,
-                           "IL_loss": IL_loss,},
-                          step=epoch)
+                wandb.log({"test_return": test_return, "IL_loss": IL_loss}, step=epoch)
                 print(f"Epoch: {epoch}, test return: {test_return}, IL loss: {IL_loss}")
-                # if update_step == 1 or test_return > max(best_test_return, -15) and update_step > 500:
-                # if update_step == 200 or test_return > max(best_test_return, -15) and update_step > 200:
-                if tested_times == config["NUM_EPOCHS"]//config["TEST_INTERVAL"] - 1:
+                if tested_times == config["NUM_EPOCHS"] // config["TEST_INTERVAL"] - 1:
                     if not os.path.exists(config["STUDENT_NETWORK_SAVE_PATH"]):
                         os.makedirs(config["STUDENT_NETWORK_SAVE_PATH"])
                     file_path = os.path.join(config["STUDENT_NETWORK_SAVE_PATH"], f'{config["ENV_NAME"]}_final.msgpack')
                     with open(file_path, "wb") as f:
                         f.write(serialization.to_bytes(params))
                     print(f"Saved the best model to {file_path} with test return {test_return}")
-            jax.experimental.io_callback(callback, None, student_train_state.params, tested_times, test_return, best_test_return, IL_loss, test_states, test_obs)
-            
-            runner_state = (
-                student_train_state,
-                rng,
-                jnp.maximum(best_test_return, test_return),
-            )
-            
+
+            # Replace the jax.experimental.io_callback line with a direct call to run_callback
+            run_callback(student_train_state.params, tested_times, test_return, best_test_return, IL_loss)
+
+
+            runner_state = (student_train_state, rng, jnp.maximum(best_test_return, test_return))
             return runner_state, (test_return, IL_loss)
-        
-        runner_state = (
-            student_train_state,
-            rng,
-            float('-inf') # best return
-        )
-        
-        runner_state, metric = jax.lax.scan(
-            _train_epochs_and_one_test, runner_state, np.arange(config["NUM_EPOCHS"]//config["TEST_INTERVAL"])
-        )
+
+        # Replace outer scan with a for loop
+        runner_state = (student_train_state, rng, float('-inf'))
+        metrics = []
+
+        for i in range(config["NUM_EPOCHS"] // config["TEST_INTERVAL"]):
+            runner_state, metric = _train_epochs_and_one_test(runner_state, i)
+            metrics.append(metric)
+
         print(f"Training finished after {config['NUM_EPOCHS']} epochs.")
-        return {"runner_state": runner_state, "metric": metric}
-    
+        return {"runner_state": runner_state, "metric": metrics}
+
+
     return train
 
 @hydra.main(version_base=None, config_path="config", config_name="offline_IL_config")
@@ -311,18 +278,16 @@ def main(config):
         tags=["None"],
         name=wandb_name,
         config=config,
-        mode=config["WANDB_MODE"],
-        # mode='disabled',
+        # mode=config["WANDB_MODE"],
+        mode='disabled',
     )
     
     if config["TRAIN"]:
         train = make_train(config)
-        with jax.disable_jit(config["DISABLE_JIT"]):
-            jit_train = jax.jit(train)
-            rng = jax.random.PRNGKey(config["SEED"])
-            output = jit_train(rng)
+        rng = jax.random.PRNGKey(config["SEED"])
+        output = train(rng)  # Directly call the train function without jit
         print("training finished")
-        
+
     if config["RENDER"]:
         # Load model parameters
         student_model = ActorRNN(action_dim=gym.make(config["ENV_NAME"]).action_space.shape[0], config=config)

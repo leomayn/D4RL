@@ -1,0 +1,18 @@
+ENV_NAME: halfcheetah
+ALG_NAME: AWAC
+NETWORK_TYPE: MLP
+PARAMETER_SAVE_PATH: null
+AWAC_HIDDEN_DIM:
+- 256
+- 256
+- 256
+- 256
+NUM_STEPS: 1000
+REWARD_TYPE: real
+D4RL_ENV: halfcheetah-medium-expert-v2
+IL_NETWORK_HIDDEN: 128
+IL_NETWORK_SAVE_PATH: results/IL_configs/il_network
+IL_ENV_NAME: halfcheetah-medium-expert-v2
+USE_BEST: false
+USE_FINAL: true
+RNG: 6

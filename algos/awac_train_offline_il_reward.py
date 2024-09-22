@@ -6,7 +6,7 @@ from absl import app, flags
 from ml_collections import config_flags
 from tensorboardX import SummaryWriter
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 from jaxrl.agents import BCLearner, AWACLearner
 from jaxrl.datasets import make_env_and_dataset
@@ -20,7 +20,7 @@ from flax import serialization
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'halfcheetah-expert-v2', 'Environment name.')
+flags.DEFINE_string('env_name', 'halfcheetah-medium-expert-v2', 'Environment name.')
 flags.DEFINE_string('il_env_name', 'halfcheetah-medium-expert-v2', 'IL Environment name.')
 flags.DEFINE_integer('il_network_hidden', 128, 'IL network hidden.')
 flags.DEFINE_string('il_network_save_path', 'results/IL_configs/student_network', 'IL network hidden.')
@@ -114,10 +114,16 @@ def main(_):
     
     print("obs: ", obs.shape)
     
+    
     # init_hs = ScannedRNN.initialize_carry(batch_size, il_network_hidden)
     init_hs = ScannedRNN.initialize_carry(num_samples, il_network_hidden)
     
     reward, _ = generate_reward(il_model, il_params, obs, action, dones, init_hs)
+    
+    # after generating reward, get mean and std of reward and normalize
+    reward_mean = jnp.mean(reward)
+    reward_std = jnp.std(reward)
+    reward = (reward - reward_mean) / reward_std
     
     # reward = reward.reshape(num_samples)
     
@@ -125,6 +131,7 @@ def main(_):
     print("reward: ", reward.shape)
 
     dataset.rewards = reward
+    # dataset.rewards = jnp.zeros_like(reward)
 
 
     if FLAGS.percentage < 100.0:

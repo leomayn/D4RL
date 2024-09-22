@@ -1,0 +1,1 @@
+{"training/actor_loss": -2.653745174407959, "training/critic_loss": 6.5189208984375, "_timestamp": 1727034693.1626508, "training/alpha": 0.5, "_runtime": 227.55786085128784, "_step": 88000, "halfcheetah-medium-expert-v2/normalized_score": 43.75114822387695, "_wandb": {"runtime": 227}}

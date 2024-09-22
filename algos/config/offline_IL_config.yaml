@@ -1,12 +1,14 @@
 "DEBUG": False
 "DISABLE_JIT": False
 "SEED": 3
-# "ENV_NAME": "halfcheetah-medium-expert-v2"
-# "TEST_ENV_NAME": "halfcheetah"
-"ENV_NAME": "hopper-medium-expert-v2"
-"TEST_ENV_NAME": "hopper"
+"ENV_NAME": "halfcheetah-expert-v2"
+"TEST_ENV_NAME": "halfcheetah"
+# "ENV_NAME": "hopper-medium-expert-v2"
+# "TEST_ENV_NAME": "hopper"
 # "ENV_NAME": "antmaze-umaze-v2"
 # "TEST_ENV_NAME": "ant"
+# "ENV_NAME": 'walker2d-medium-expert-v2'
+# "TEST_ENV_NAME": walker2d
 "ENV_KWARGS": {}
 
 "LR": 1e-3
@@ -16,8 +18,8 @@
 "NUM_STEPS": 128
 "NUM_ENVS": 128
 "NUM_EPOCHS": 100
-# "NUM_TEST_ENVS": 10
-"NUM_TEST_ENVS": 128
+"NUM_TEST_ENVS": 10
+# "NUM_TEST_ENVS": 128
 "NUM_TEST_STEPS": 1000
 "BATCH_SIZE": 10
 "TEST_INTERVAL": 1
